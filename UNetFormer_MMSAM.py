@@ -547,20 +547,17 @@ class UNetFormer(nn.Module):
         # self.decoder = Decoder_single(encoder_channels, decode_channels, dropout, window_size, num_classes)
 
     def forward(self, x, y, mode='Train'):
-        """Forward pass of UNetFormer with DSM channel handling."""
-        # x: [N, 3, H, W], y: DSM input, either [N, H, W] or [N, 1, H, W]
         h, w = x.size()[-2:]
+        y = torch.unsqueeze(y, dim=1).repeat(1, 3, 1, 1)
+        deepx, deepy = self.image_encoder(x, y)  # 256*16*16
 
-        # <<< 修改点: 确保 y 具有 4 维 [N,1,H,W] >>>
-        if y.dim() == 3:
-            y = y.unsqueeze(1)
-        # <<< 修改点: 将单通道复制到 3 通道 >>>
-        y = y.repeat(1, 3, 1, 1)
+        # res1 = self.fpn1x(deepx)
+        # res2 = self.fpn2x(deepx)
+        # res3 = self.fpn3x(deepx)
+        # res4 = self.fpn4x(deepx)
+        # x = self.decoder(res1, res2, res3, res4, h, w)
 
-        # 调用 SAM 图像编码器
-        deepx, deepy = self.image_encoder(x, y)
-
-        # 以下保持原有融合及解码逻辑
+        # #PFF:
         res1x = self.fpn1x(deepx)
         res2x = self.fpn2x(deepx)
         res3x = self.fpn3x(deepx)
@@ -574,5 +571,9 @@ class UNetFormer(nn.Module):
         res3 = self.fusion3(res3x, res3y)
         res4 = self.fusion4(res4x, res4y)
         x = self.decoder(res1, res2, res3, res4, h, w)
+
+        # ## without PFF: switch Decoder_single
+        # res4 = deepx + deepy
+        # x = self.decoder(res4, h, w)
 
         return x

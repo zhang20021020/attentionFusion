@@ -102,46 +102,39 @@ def test(net, test_ids, all=False, stride=WINDOW_SIZE[0], batch_size=BATCH_SIZE,
 
     with torch.no_grad():
         for img, dsm, gt, gt_e in zip(test_images, test_dsms, test_labels, eroded_labels):
-            # <<< 修改点1：将 pred pad 到能被窗口整除的大小 >>>
-            orig_h, orig_w = gt_e.shape
-            wh, ww = window_size
-            pad_h = int(np.ceil(orig_h / wh) * wh)
-            pad_w = int(np.ceil(orig_w / ww) * ww)
-            pred_padded = np.zeros((pad_h, pad_w, N_CLASSES), dtype=np.float32)
+            pred = np.zeros(img.shape[:2] + (N_CLASSES,))
 
-            for coords in grouper(batch_size, sliding_window(img, step=stride, window_size=window_size)):
-                # 准备 image_tensor 和 dsm_tensor（同原逻辑）
-                image_patches = [
-                    img[x:x + w, y:y + h].transpose(2, 0, 1)
-                    for x, y, w, h in coords
-                ]
-                image_patches = [pad_patch(p, wh, ww) for p in image_patches]
-                image_tensor = torch.from_numpy(np.stack(image_patches)).cuda()
+            total = count_sliding_window(img, step=stride, window_size=window_size) // batch_size
+            for i, coords in enumerate(grouper(batch_size, sliding_window(img, step=stride, window_size=window_size))):
+                image_patches = [np.copy(img[x:x + w, y:y + h]).transpose((2, 0, 1)) for x, y, w, h in coords]
+                image_patches = np.asarray(image_patches)
+                image_patches = Variable(torch.from_numpy(image_patches).cuda(), volatile=True)
 
                 mn, mx = dsm.min(), dsm.max()
-                norm_dsm = (dsm - mn) / (mx - mn + 1e-8)
-                dsm_patches = [
-                    norm_dsm[x:x + w, y:y + h]
-                    for x, y, w, h in coords
-                ]
-                dsm_patches = [pad_patch(p, wh, ww) for p in dsm_patches]
-                dsm_tensor = torch.from_numpy(np.stack(dsm_patches)).unsqueeze(1).cuda()
+                norm_dsm = (dsm - mn) / (mx - mn)
+                dsm_patches = [np.copy(norm_dsm[x:x + w, y:y + h]) for x, y, w, h in coords]
+                dsm_patches = np.asarray(dsm_patches)
+                dsm_patches = Variable(torch.from_numpy(dsm_patches).cuda(), volatile=True)
 
-                outs = net(image_tensor, dsm_tensor, mode='Test').cpu().numpy()
+
+
+                outs = net(image_patches, dsm_patches, mode='Test')
+                outs = outs.data.cpu().numpy()
 
                 for out, (x, y, w, h) in zip(outs, coords):
-                    out = out.transpose(1, 2, 0)
-                    # <<< 修改点2：将整个 out 累加到 pred_padded，无需根据边界裁切 >>>
-                    pred_padded[x:x + wh, y:y + ww] += out
+                    out = out.transpose((1, 2, 0))
+                    pred[x:x + w, y:y + h] += out
+                del outs
 
-            # <<< 修改点3：裁剪回原始大小 >>>
-            pred = pred_padded[:orig_h, :orig_w]
-            all_preds.append(np.argmax(pred, axis=-1))
+            pred = np.argmax(pred, axis=-1)
+            all_preds.append(pred)
             all_gts.append(gt_e)
+            clear_output()
 
-    flat_p = np.concatenate([p.ravel() for p in all_preds])
-    flat_g = np.concatenate([g.ravel() for g in all_gts])
-    accuracy = metrics(flat_p, flat_g)
+    accuracy = metrics(
+        np.concatenate([p.ravel() for p in all_preds]),
+        np.concatenate([g.ravel() for g in all_gts]).ravel()
+    )
     if all:
         return accuracy, all_preds, all_gts
     else:
@@ -154,14 +147,14 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
     weights = weights.cuda()
 
     iter_     = 0
-    MIoU_best = 0.76
+    MIoU_best = 0.82
     for e in range(1, epochs + 1):
         if scheduler is not None:
             scheduler.step()
         net.train()
         start_time = time.time()
         for batch_idx, (data, dsm, target) in enumerate(train_loader):
-            data, dsm, target = Variable(data.cuda()), Variable(dsm.cuda()), Variable(target.cuda().long())
+            data, dsm, target = Variable(data.cuda()), Variable(dsm.cuda()), Variable(target.cuda())
             optimizer.zero_grad()
             output = net(data, dsm, mode='Train')
             loss = CrossEntropy2d(output, target, weight=weights)
@@ -204,7 +197,7 @@ if MODE == 'Train':
 
 elif MODE == 'Test':
     if DATASET == 'Vaihingen':
-        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch15_0.7836249556489634'), strict=False)
+        net.load_state_dict(torch.load('./resultsv/UNetformer_epoch31_0.8423784622411172'), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)

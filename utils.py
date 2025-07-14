@@ -11,38 +11,38 @@ import os
 
 # Parameters
 ## SwinFusion
-WINDOW_SIZE = (256, 256) # Patch size
+WINDOW_SIZE = (256, 256)  # Patch size
 
-STRIDE = 32 # Stride for testing
-IN_CHANNELS = 3 # Number of input channels (e.g. RGB)
+STRIDE = 32  # Stride for testing
+IN_CHANNELS = 3  # Number of input channels (e.g. RGB)
 # FOLDER = "/ISPRS_dataset/" # Replace with your "/path/to/the/ISPRS/dataset/folder/"
 FOLDER = "/home/p24030854116/datebase/ISPRS_dataset/"
-BATCH_SIZE = 5
+BATCH_SIZE = 10
 # BATCH_SIZE = 4 # For backbone ViT-Huge
 
-LABELS = ["roads", "buildings", "low veg.", "trees", "cars", "clutter"] # Label names
-N_CLASSES = len(LABELS) # Number of classes
-WEIGHTS = torch.ones(N_CLASSES) # Weights for class balancing
-CACHE = True # Store the dataset in-memory
+LABELS = ["roads", "buildings", "low veg.", "trees", "cars", "clutter"]  # Label names
+N_CLASSES = len(LABELS)  # Number of classes
+WEIGHTS = torch.ones(N_CLASSES)  # Weights for class balancing
+CACHE = True  # Store the dataset in-memory
 
 # ISPRS color palette
 # Let's define the standard ISPRS color palette
-palette = {0 : (255, 255, 255), # Impervious surfaces (white)
-           1 : (0, 0, 255),     # Buildings (blue)
-           2 : (0, 255, 255),   # Low vegetation (cyan)
-           3 : (0, 255, 0),     # Trees (green)
-           4 : (255, 255, 0),   # Cars (yellow)
-           5 : (255, 0, 0),     # Clutter (red)
-           6 : (0, 0, 0)}       # Undefined (black)
+palette = {0: (255, 255, 255),  # Impervious surfaces (white)
+           1: (0, 0, 255),  # Buildings (blue)
+           2: (0, 255, 255),  # Low vegetation (cyan)
+           3: (0, 255, 0),  # Trees (green)
+           4: (255, 255, 0),  # Cars (yellow)
+           5: (255, 0, 0),  # Clutter (red)
+           6: (0, 0, 0)}  # Undefined (black)
 
 invert_palette = {v: k for k, v in palette.items()}
 
 MODEL = 'UNetformer'
 # MODEL = 'FTUNetformer'
-# MODE = 'Train'
-MODE = 'Test'
-DATASET = 'Vaihingen'
-# DATASET = 'Potsdam'
+MODE = 'Train'
+# MODE = 'Test'
+# DATASET = 'Vaihingen'
+DATASET = 'Potsdam'
 IF_SAM = True
 # IF_SAM = False
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -62,7 +62,7 @@ if DATASET == 'Vaihingen':
     ERODED_FOLDER = MAIN_FOLDER + 'gts_eroded_for_participants/top_mosaic_09cm_area{}_noBoundary.tif'
 elif DATASET == 'Potsdam':
     train_ids = ['6_10', '7_10', '2_12', '3_11', '2_10', '7_8', '5_10', '3_12', '5_12', '7_11', '7_9', '6_9', '7_7',
-                '4_12', '6_8', '6_12', '6_7', '4_11']
+                 '4_12', '6_8', '6_12', '6_7', '4_11']
     test_ids = ['4_10', '5_11', '2_11', '3_10', '6_11', '7_12']
     Stride_Size = 128
     epochs = 30
@@ -73,9 +73,10 @@ elif DATASET == 'Potsdam':
     LABEL_FOLDER = MAIN_FOLDER + '5_Labels_for_participants/top_potsdam_{}_label.tif'
     ERODED_FOLDER = MAIN_FOLDER + '5_Labels_for_participants_no_Boundary/top_potsdam_{}_label_noBoundary.tif'
 
-print(MODEL + ', ' + MODE + ', ' + DATASET + ', IF_SAM: ' + str(IF_SAM) + ', WINDOW_SIZE: ', WINDOW_SIZE, 
+print(MODEL + ', ' + MODE + ', ' + DATASET + ', IF_SAM: ' + str(IF_SAM) + ', WINDOW_SIZE: ', WINDOW_SIZE,
       ', BATCH_SIZE: ' + str(BATCH_SIZE), ', Stride_Size: ', str(Stride_Size),
-      ', epochs: ' + str(epochs), ', save_epoch: ', str(save_epoch),)
+      ', epochs: ' + str(epochs), ', save_epoch: ', str(save_epoch), )
+
 
 def convert_to_color(arr_2d, palette=palette):
     """ Numeric labels to RGB-color encoding """
@@ -87,6 +88,7 @@ def convert_to_color(arr_2d, palette=palette):
 
     return arr_3d
 
+
 def convert_from_color(arr_3d, palette=invert_palette):
     """ RGB-color encoding to grayscale labels """
     arr_2d = np.zeros((arr_3d.shape[0], arr_3d.shape[1]), dtype=np.uint8)
@@ -97,11 +99,13 @@ def convert_from_color(arr_3d, palette=invert_palette):
 
     return arr_2d
 
+
 def save_img(tensor, name):
-    tensor = tensor.cpu() .permute((1, 0, 2, 3))
+    tensor = tensor.cpu().permute((1, 0, 2, 3))
     im = make_grid(tensor, normalize=True, scale_each=True, nrow=8, padding=2).permute((1, 2, 0))
     im = (im.data.numpy() * 255.).astype(np.uint8)
     Image.fromarray(im).save(name + '.jpg')
+
 
 class ISPRS_dataset(torch.utils.data.Dataset):
     def __init__(self, ids, data_files=DATA_FOLDER, label_files=LABEL_FOLDER,
@@ -175,7 +179,7 @@ class ISPRS_dataset(torch.utils.data.Dataset):
                 # data = io.imread(self.data_files[random_idx])[:, :, (3, 0, 1, 2)][:, :, :3].transpose((2, 0, 1))
                 data = 1 / 255 * np.asarray(data, dtype='float32')
             else:
-            ## Vaihingen IRRG
+                ## Vaihingen IRRG
                 data = io.imread(self.data_files[random_idx])
                 data = 1 / 255 * np.asarray(data.transpose((2, 0, 1)), dtype='float32')
             if self.cache:
@@ -196,11 +200,7 @@ class ISPRS_dataset(torch.utils.data.Dataset):
             label = self.label_cache_[random_idx]
         else:
             # Labels are converted from RGB to their numeric values
-            label = np.asarray(
-                convert_from_color(io.imread(self.label_files[random_idx])),
-                dtype=np.int32  # <<< 改为 32 位，内存减半
-            )
-
+            label = np.asarray(convert_from_color(io.imread(self.label_files[random_idx])), dtype='int64')
             if self.cache:
                 self.label_cache_[random_idx] = label
 
@@ -217,7 +217,8 @@ class ISPRS_dataset(torch.utils.data.Dataset):
         return (torch.from_numpy(data_p),
                 torch.from_numpy(dsm_p),
                 torch.from_numpy(label_p))
-        
+
+
 ## We load one tile from the dataset and we display it
 # img = io.imread('./ISPRS_dataset/Vaihingen/top/top_mosaic_09cm_area11.tif')
 # fig = plt.figure()
@@ -340,7 +341,7 @@ def metrics(predictions, gts, label_values=LABELS):
     pa = np.trace(cm) / float(total)
     pe = np.sum(np.sum(cm, axis=0) * np.sum(cm, axis=1)) / float(total * total)
     kappa = (pa - pe) / (1 - pe)
-    print("Kappa: %.4f" %(kappa))
+    print("Kappa: %.4f" % (kappa))
 
     # Compute MIoU coefficient
     MIoU = np.diag(cm) / (np.sum(cm, axis=1) + np.sum(cm, axis=0) - np.diag(cm))
