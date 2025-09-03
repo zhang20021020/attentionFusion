@@ -41,8 +41,8 @@ MODEL = 'UNetformer'
 # MODEL = 'FTUNetformer'
 MODE = 'Train'
 # MODE = 'Test'
-DATASET = 'Vaihingen'
-# DATASET = 'Potsdam'
+# DATASET = 'Vaihingen'
+DATASET = 'Potsdam'
 IF_SAM = True
 # IF_SAM = False
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -53,7 +53,7 @@ if DATASET == 'Vaihingen':
     # train_ids = ['1']
     # test_ids = ['5']
     Stride_Size = 32
-    epochs = 30
+    epochs = 50
     save_epoch = 1
     MAIN_FOLDER = FOLDER + 'Vaihingen/'
     DATA_FOLDER = MAIN_FOLDER + 'top/top_mosaic_09cm_area{}.tif'
@@ -65,7 +65,7 @@ elif DATASET == 'Potsdam':
                  '4_12', '6_8', '6_12', '6_7', '4_11']
     test_ids = ['4_10', '5_11', '2_11', '3_10', '6_11', '7_12']
     Stride_Size = 128
-    epochs = 30
+    epochs = 50
     save_epoch = 1
     MAIN_FOLDER = FOLDER + 'Potsdam/'
     DATA_FOLDER = MAIN_FOLDER + '4_Ortho_RGBIR/top_potsdam_{}_RGBIR.tif'

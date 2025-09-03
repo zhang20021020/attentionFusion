@@ -17,6 +17,18 @@ from utils import *
 from torch.autograd import Variable
 from IPython.display import clear_output
 from UNetFormer_MMSAM import UNetFormer as MFNet
+
+import random
+
+SEED = 42  # 你可以选择任意整数作为种子
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+torch.cuda.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
 try:
     from urllib.request import URLopener
 except ImportError:
@@ -146,18 +158,21 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
     mean_losses = np.zeros(100000000)
     weights = weights.cuda()
 
-    iter_     = 0
-    MIoU_best = 0.82
+    iter_         = 0
+    MIoU_best     = 0.85
+    epoch_losses  = []
+
     for e in range(1, epochs + 1):
         if scheduler is not None:
             scheduler.step()
         net.train()
         start_time = time.time()
+
         for batch_idx, (data, dsm, target) in enumerate(train_loader):
             data, dsm, target = Variable(data.cuda()), Variable(dsm.cuda()), Variable(target.cuda())
             optimizer.zero_grad()
             output = net(data, dsm, mode='Train')
-            if isinstance(output, tuple):  # 👈 加这一段
+            if isinstance(output, tuple):
                 output = output[0]
             loss = CrossEntropy2d(output, target, weight=weights)
             loss.backward()
@@ -177,7 +192,11 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
             iter_ += 1
             del data, target, loss
 
-        if e % save_epoch == 0 and e>10 :
+        # 每个epoch结束，计算当前epoch的平均loss
+        epoch_mean_loss = np.mean(losses[max(0, iter_ - len(train_loader)):iter_])
+        epoch_losses.append(epoch_mean_loss)
+
+        if e % save_epoch == 0 and e > 10:
             train_time = time.time()
             print("Training time: {:.3f} seconds".format(train_time - start_time))
             net.eval()
@@ -191,7 +210,19 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
                 elif DATASET == 'Potsdam':
                     torch.save(net.state_dict(), './resultsp/{}_epoch{}_{}'.format(MODEL, e, MIoU))
                 MIoU_best = MIoU
+
     print('MIoU_best: ', MIoU_best)
+
+    # 所有epoch结束后，绘制loss图
+    plt.figure()
+    plt.plot(range(1, len(epoch_losses)+1), epoch_losses, label='Epoch Average Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training Loss Over Epochs')
+    plt.grid(True)
+    plt.legend()
+    plt.savefig('training_loss_curve.png')
+    plt.show()
 
 
 if MODE == 'Train':
@@ -208,9 +239,9 @@ elif MODE == 'Test':
             io.imsave('./resultsv/inference_UNetFormer_{}_tile_{}.png'.format('huge', id_), img)
 
     elif DATASET == 'Potsdam':
-        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch30_0.8517950623200179'), strict=False)
+        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch54_0.8576.pth'), strict=False)
         net.eval()
-        MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
+        MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=24)
         print("MIoU: ", MIoU)
         for p, id_ in zip(all_preds, test_ids):
             img = convert_to_color(p)
