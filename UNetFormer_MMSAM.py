@@ -10,7 +10,7 @@ import torch.autograd as autograd
 from MedSAM.models.sam import sam_model_registry
 import MedSAM.cfg as cfg
 import matplotlib.pyplot as plt
-from epsanet import PSAModule
+
 
 class Norm2d(nn.Module):
     def __init__(self, embed_dim):
@@ -991,81 +991,30 @@ class UNetFormer(nn.Module):
         self.image_encoder = self.sam.image_encoder
         encoder_channels = (256, 256, 256, 256)
 
-        # self.fpn1x = nn.Sequential(
-        #     nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
-        #     Norm2d(256),
-        #     nn.GELU(),
-        #     nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
-        # )
-        # self.fpn2x = nn.Sequential(
-        #     nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
-        # )
-        # self.fpn3x = nn.Identity()
-        # self.fpn4x = nn.MaxPool2d(kernel_size=2, stride=2)
-        #
-        # self.fpn1y = nn.Sequential(
-        #     nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
-        #     nn.BatchNorm2d(256),
-        #     nn.GELU(),
-        #     nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
-        # )
-        # self.fpn2y = nn.Sequential(
-        #     nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
-        # )
-        # self.fpn3y = nn.Identity()
-        # self.fpn4y = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        # 替换为PSA模块
-
-        # =========================
-        # X 分支（保持原来 x 分支的 Norm2d/GELU 风格）
-        # =========================
         self.fpn1x = nn.Sequential(
-            PSAModule(inplans=256, planes=256),
-            nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),  # ↑×2
+            nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
             Norm2d(256),
             nn.GELU(),
-            nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),  # 再 ↑×2  => 总体 ×4
+            nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
         )
-
         self.fpn2x = nn.Sequential(
-            PSAModule(inplans=256, planes=256),
-            nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),  # ↑×2
+            nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
         )
+        self.fpn3x = nn.Identity()
+        self.fpn4x = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        self.fpn3x = nn.Sequential(
-            PSAModule(inplans=256, planes=256),  # 尺度不变
-        )
-
-        self.fpn4x = nn.Sequential(
-            PSAModule(inplans=256, planes=256),
-            nn.MaxPool2d(kernel_size=2, stride=2),  # ↓×2
-        )
-
-        # =========================
-        # Y 分支（保持原来 y 分支的 BatchNorm2d/GELU 风格）
-        # =========================
         self.fpn1y = nn.Sequential(
-            PSAModule(inplans=256, planes=256),
-            nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),  # ↑×2
+            nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
             nn.BatchNorm2d(256),
             nn.GELU(),
-            nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),  # 再 ↑×2  => 总体 ×4
+            nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
         )
-
         self.fpn2y = nn.Sequential(
-            PSAModule(inplans=256, planes=256),
-            nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),  # ↑×2
+            nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
         )
+        self.fpn3y = nn.Identity()
+        self.fpn4y = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        self.fpn3y = nn.Sequential(
-            PSAModule(inplans=256, planes=256),  # 尺度不变
-        )
-
-        self.fpn4y = nn.Sequential(
-            PSAModule(inplans=256, planes=256),
-            nn.MaxPool2d(kernel_size=2, stride=2),  # ↓×2
-        )
 
         self.fusion1 = SEFusion(encoder_channels[0])
         self.fusion2 = SEFusion(encoder_channels[1])

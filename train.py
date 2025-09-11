@@ -159,7 +159,7 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
     weights = weights.cuda()
 
     iter_         = 0
-    MIoU_best     = 0.85
+    MIoU_best     = 0.83
     epoch_losses  = []
 
     for e in range(1, epochs + 1):
