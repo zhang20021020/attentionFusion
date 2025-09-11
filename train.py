@@ -22,6 +22,14 @@ try:
 except ImportError:
     from urllib import URLopener
 
+SEED = 42  # 你可以选择任意整数作为种子
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+torch.cuda.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 # Helper: pad or crop a patch to fixed size
 def pad_patch(patch, target_h, target_w):
@@ -41,7 +49,7 @@ def pad_patch(patch, target_h, target_w):
         out[:h, :w] = patch[:target_h,:target_w]
         return out
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 print("torch sees {} GPUs".format(torch.cuda.device_count()))
 print("Current device:", torch.cuda.current_device())
@@ -208,7 +216,7 @@ elif MODE == 'Test':
     elif DATASET == 'Potsdam':
         net.load_state_dict(torch.load('./resultsp/UNetformer_epoch30_0.8517950623200179'), strict=False)
         net.eval()
-        MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
+        MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=24)
         print("MIoU: ", MIoU)
         for p, id_ in zip(all_preds, test_ids):
             img = convert_to_color(p)

@@ -65,7 +65,7 @@ elif DATASET == 'Potsdam':
                  '4_12', '6_8', '6_12', '6_7', '4_11']
     test_ids = ['4_10', '5_11', '2_11', '3_10', '6_11', '7_12']
     Stride_Size = 128
-    epochs = 30
+    epochs = 50
     save_epoch = 1
     MAIN_FOLDER = FOLDER + 'Potsdam/'
     DATA_FOLDER = MAIN_FOLDER + '4_Ortho_RGBIR/top_potsdam_{}_RGBIR.tif'
