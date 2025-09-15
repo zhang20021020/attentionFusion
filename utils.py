@@ -17,7 +17,7 @@ STRIDE = 32  # Stride for testing
 IN_CHANNELS = 3  # Number of input channels (e.g. RGB)
 # FOLDER = "/ISPRS_dataset/" # Replace with your "/path/to/the/ISPRS/dataset/folder/"
 FOLDER = "/home/p24030854116/datebase/ISPRS_dataset/"
-BATCH_SIZE = 10
+BATCH_SIZE = 5
 # BATCH_SIZE = 4 # For backbone ViT-Huge
 
 LABELS = ["roads", "buildings", "low veg.", "trees", "cars", "clutter"]  # Label names

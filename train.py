@@ -30,7 +30,6 @@ torch.cuda.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
-
 # Helper: pad or crop a patch to fixed size
 def pad_patch(patch, target_h, target_w):
     """Pad or crop patch to (target_h, target_w)."""
@@ -155,7 +154,7 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
     weights = weights.cuda()
 
     iter_     = 0
-    MIoU_best = 0.82
+    MIoU_best = 0.83
     for e in range(1, epochs + 1):
         if scheduler is not None:
             scheduler.step()
