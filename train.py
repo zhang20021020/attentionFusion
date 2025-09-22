@@ -182,7 +182,7 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
             iter_ += 1
             del data, target, loss
 
-        if e % save_epoch == 0:
+        if e % save_epoch == 0 and e>10:
             train_time = time.time()
             print("Training time: {:.3f} seconds".format(train_time - start_time))
             net.eval()

@@ -290,6 +290,83 @@ class SEFusion(nn.Module):
         return out
 
 
+# =========================
+# CFA / CFD for CFPN (4-level)
+# =========================
+class CFA(nn.Module):
+    """
+    Cross-layer Feature Aggregation (4-level version)
+    inputs: list of 4 feature maps [res1, res2, res3, res4] with channels given by in_dims.
+            res1 has the highest spatial resolution and will be used as the reference size.
+    """
+
+    def __init__(self, in_dims=(256, 256, 256, 256), reduce_dims=(256, 256, 256, 256), mlp_hidden=128):
+        super().__init__()
+        assert len(in_dims) == 4 and len(reduce_dims) == 4
+        self.reducers = nn.ModuleList([Conv(in_c, out_c, kernel_size=1) for in_c, out_c in zip(in_dims, reduce_dims)])
+        self.reduce_dims = list(reduce_dims)
+        self.D = sum(self.reduce_dims)
+        self.N = 4
+        # FC-ReLU-FC → Ψ (per-level weights)
+        self.fc1 = nn.Linear(self.D, mlp_hidden)
+        self.fc2 = nn.Linear(mlp_hidden, self.N)
+        # keep early training stable: start as identity scaling (s≈1)
+        nn.init.zeros_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(self, feats):
+        # reduce dims
+        feats_r = [r(f) for r, f in zip(self.reducers, feats)]  # [B, di, Hi, Wi]
+        # GAP each level and concat
+        gap_vecs = [F.adaptive_avg_pool2d(fr, 1).flatten(1) for fr in feats_r]
+        Z = torch.cat(gap_vecs, dim=1)  # [B, D]
+        # layer weights Ψ
+        psi = self.fc2(F.relu(self.fc1(Z)))  # [B, 4]
+
+        # scale per level: s = 1 + 0.1 * tanh(psi)  (preserve features at init)
+        scaled = []
+        for i, fr in enumerate(feats_r):
+            s = 1.0 + 0.1 * torch.tanh(psi[:, i]).view(-1, 1, 1, 1)
+            scaled.append(fr * s)
+
+        # upsample to level-0 (res1) and concat → F_glb
+        H0, W0 = feats_r[0].shape[-2:]
+        up = [scaled[0]] + [F.interpolate(x, size=(H0, W0), mode='bilinear', align_corners=False) for x in scaled[1:]]
+        F_glb = torch.cat(up, dim=1)  # [B, sum(di), H0, W0]
+        return scaled, F_glb
+
+
+class CFD(nn.Module):
+    """
+    Cross-layer Feature Distribution (4-level)
+    Distribute global fused F_glb back to 4 resolutions via pyramid pooling.
+    """
+
+    def __init__(self, out_dims=(256, 256, 256, 256), pool_strides=(1, 2, 4, 8)):
+        super().__init__()
+        assert len(out_dims) == 4 and len(pool_strides) == 4
+        self.pool_strides = pool_strides
+        total_in = sum(out_dims)
+        self.refine = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(total_in, c, kernel_size=3, padding=1, bias=False),
+                nn.BatchNorm2d(c),
+                nn.ReLU(inplace=True)
+            ) for c in out_dims
+        ])
+
+    def forward(self, F_glb):
+        B, D, H0, W0 = F_glb.shape
+        outs = []
+        for i, s in enumerate(self.pool_strides):
+            if s == 1:
+                pooled = F_glb
+            else:
+                pooled = F.avg_pool2d(F_glb, kernel_size=s, stride=s)
+            outs.append(self.refine[i](pooled))
+        return outs  # [Y1, Y2, Y3, Y4]
+
+
 class FeatureRefinementHead_single(nn.Module):
     def __init__(self, in_channels=64, decode_channels=64):
         super().__init__()
@@ -314,9 +391,6 @@ class FeatureRefinementHead_single(nn.Module):
 
     def forward(self, x):
         x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
-        # weights = nn.ReLU()(self.weights)
-        # fuse_weights = weights / (torch.sum(weights, dim=0) + self.eps)
-        # x = fuse_weights[0] * self.pre_conv(res) + fuse_weights[1] * x
         x = self.post_conv(x)
         shortcut = self.shortcut(x)
         pa = self.pa(x) * x
@@ -484,9 +558,6 @@ def draw_features(feature, savename=''):
     visualize = visualize.detach().cpu().numpy()
     visualize = np.mean(visualize, axis=1).reshape(H, W)
     visualize = (((visualize - np.min(visualize)) / (np.max(visualize) - np.min(visualize))) * 255).astype(np.uint8)
-    # fvis = np.fft.fft2(visualize)
-    # fshift = np.fft.fftshift(fvis)
-    # fshift = 20*np.log(np.abs(fshift))
     savedir = savename
     visualize = cv2.applyColorMap(visualize, cv2.COLORMAP_JET)
     cv2.imwrite(savedir, visualize)
@@ -497,7 +568,9 @@ class UNetFormer(nn.Module):
                  decode_channels=64,
                  dropout=0.1,
                  window_size=8,
-                 num_classes=6
+                 num_classes=6,
+                 use_cfpn=True,
+                 cfpn_blend='add'  # 'replace' | 'add' (default add for safer warm-up)
                  ):
         super().__init__()
         args = cfg.parse_args()
@@ -507,6 +580,7 @@ class UNetFormer(nn.Module):
         self.image_encoder = self.sam.image_encoder
         encoder_channels = (256, 256, 256, 256)
 
+        # Pyramid (x/y) branches
         self.fpn1x = nn.Sequential(
             nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
             Norm2d(256),
@@ -531,17 +605,29 @@ class UNetFormer(nn.Module):
         self.fpn3y = nn.Identity()
         self.fpn4y = nn.MaxPool2d(kernel_size=2, stride=2)
 
+        # SE-fusion per level
         self.fusion1 = SEFusion(encoder_channels[0])
         self.fusion2 = SEFusion(encoder_channels[1])
         self.fusion3 = SEFusion(encoder_channels[2])
         self.fusion4 = SEFusion(encoder_channels[3])
+
+        # Freeze image encoder (except LoRA/Adapter if any)
         for n, value in self.image_encoder.named_parameters():
-            # if "Adapter" not in n:
             if 'lora_' not in n:
-                # if 'lora_' not in n and "Adapter" not in n:
                 value.requires_grad = False
             else:
                 value.requires_grad = True
+
+        # === CFPN insertion (after SE-fusion) ===
+        self.use_cfpn = use_cfpn
+        self.cfpn_blend = cfpn_blend
+        if self.use_cfpn:
+            # CFA expects features in order [high_res, ..., low_res]
+            self.cfa = CFA(in_dims=encoder_channels, reduce_dims=encoder_channels, mlp_hidden=128)
+            # CFD redistributes global F back to 4 scales; strides aligned to res1/res2/res3/res4
+            self.cfd = CFD(out_dims=encoder_channels, pool_strides=(1, 2, 4, 8))
+            # learnable blending gates γ_i in [0,1] via sigmoid
+            self.cfpn_gamma = nn.Parameter(torch.zeros(4))
 
         self.decoder = Decoder(encoder_channels, decode_channels, dropout, window_size, num_classes)
         # self.decoder = Decoder_single(encoder_channels, decode_channels, dropout, window_size, num_classes)
@@ -549,15 +635,9 @@ class UNetFormer(nn.Module):
     def forward(self, x, y, mode='Train'):
         h, w = x.size()[-2:]
         y = torch.unsqueeze(y, dim=1).repeat(1, 3, 1, 1)
-        deepx, deepy = self.image_encoder(x, y)  # 256*16*16
+        deepx, deepy = self.image_encoder(x, y)  # [B,256,16,16]
 
-        # res1 = self.fpn1x(deepx)
-        # res2 = self.fpn2x(deepx)
-        # res3 = self.fpn3x(deepx)
-        # res4 = self.fpn4x(deepx)
-        # x = self.decoder(res1, res2, res3, res4, h, w)
-
-        # #PFF:
+        # Build pyramids
         res1x = self.fpn1x(deepx)
         res2x = self.fpn2x(deepx)
         res3x = self.fpn3x(deepx)
@@ -566,10 +646,30 @@ class UNetFormer(nn.Module):
         res2y = self.fpn2y(deepy)
         res3y = self.fpn3y(deepy)
         res4y = self.fpn4y(deepy)
+
+        # SE fusion at each level
         res1 = self.fusion1(res1x, res1y)
         res2 = self.fusion2(res2x, res2y)
         res3 = self.fusion3(res3x, res3y)
         res4 = self.fusion4(res4x, res4y)
+
+        # === CFA + CFD after SE fusion ===
+        if self.use_cfpn:
+            feats = [res1, res2, res3, res4]  # res1: highest res
+            _, F_glb = self.cfa(feats)
+            dist = self.cfd(F_glb)  # [Y1..Y4] match [res1..res4]
+            if self.cfpn_blend == 'replace':
+                res1, res2, res3, res4 = dist[0], dist[1], dist[2], dist[3]
+            elif self.cfpn_blend == 'add':
+                g = torch.sigmoid(self.cfpn_gamma)
+                res1 = res1 + g[0] * dist[0]
+                res2 = res2 + g[1] * dist[1]
+                res3 = res3 + g[2] * dist[2]
+                res4 = res4 + g[3] * dist[3]
+            else:
+                raise ValueError("cfpn_blend must be 'replace' or 'add'")
+
+        # Decode
         x = self.decoder(res1, res2, res3, res4, h, w)
 
         # ## without PFF: switch Decoder_single
