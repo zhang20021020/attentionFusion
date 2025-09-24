@@ -570,7 +570,7 @@ class UNetFormer(nn.Module):
                  window_size=8,
                  num_classes=6,
                  use_cfpn=True,
-                 cfpn_blend='add'  # 'replace' | 'add' (default add for safer warm-up)
+                 cfpn_blend='replace'  # 'replace' | 'add' (default add for safer warm-up)
                  ):
         super().__init__()
         args = cfg.parse_args()
