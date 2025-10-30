@@ -196,7 +196,7 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
         epoch_mean_loss = np.mean(losses[max(0, iter_ - len(train_loader)):iter_])
         epoch_losses.append(epoch_mean_loss)
 
-        if e % save_epoch == 0 and e > 10:
+        if e % save_epoch == 0 :
             train_time = time.time()
             print("Training time: {:.3f} seconds".format(train_time - start_time))
             net.eval()
@@ -241,7 +241,7 @@ elif MODE == 'Test':
     elif DATASET == 'Potsdam':
         net.load_state_dict(torch.load('./resultsp/UNetformer_epoch54_0.8576.pth'), strict=False)
         net.eval()
-        MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=24)
+        MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)
         for p, id_ in zip(all_preds, test_ids):
             img = convert_to_color(p)
