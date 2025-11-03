@@ -241,7 +241,7 @@ elif MODE == 'Test':
     elif DATASET == 'Potsdam':
         net.load_state_dict(torch.load('./resultsp/UNetformer_epoch54_0.8576.pth'), strict=False)
         net.eval()
-        MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=24)
+        MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)
         for p, id_ in zip(all_preds, test_ids):
             img = convert_to_color(p)
