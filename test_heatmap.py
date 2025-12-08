@@ -1,6 +1,8 @@
 import numpy as np
 from glob import glob
-from tqdm import tqdm_notebook as tqdm
+# from tqdm import tqdm_notebook as tqdm
+from tqdm.auto import tqdm
+
 from sklearn.metrics import confusion_matrix
 import time
 import cv2
@@ -13,6 +15,9 @@ import torch.utils.data as data
 import torch.optim as optim
 import torch.optim.lr_scheduler
 import torch.nn.init
+import matplotlib
+matplotlib.use('Agg')
+
 
 from train import train
 from utils import *
@@ -25,6 +30,7 @@ try:
 except ImportError:
     from urllib import URLopener
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 if MODEL == 'UNetformer':
     net = UNetFormer(num_classes=N_CLASSES).cuda()
 # elif MODEL == 'FTUNetformer':
@@ -101,7 +107,13 @@ def test(net, test_ids, all=False, stride=WINDOW_SIZE[0], batch_size=1, window_s
 
     # Switch the network to inference mode
     index = 0
-    for img, dsm, gt, gt_e in tqdm(zip(test_images, test_dsms, test_labels, eroded_labels), total=len(test_ids), leave=False):
+    index = 0
+    for test_id, (img, dsm, gt, gt_e) in tqdm(
+            zip(test_ids, zip(test_images, test_dsms, test_labels, eroded_labels)),
+            total=len(test_ids),
+            leave=False
+    ):
+
         pred = np.zeros(img.shape[:2] + (N_CLASSES,))
 
         total = count_sliding_window(img, step=stride, window_size=window_size) // batch_size
@@ -125,7 +137,7 @@ def test(net, test_ids, all=False, stride=WINDOW_SIZE[0], batch_size=1, window_s
             dsm_patches = Variable(torch.from_numpy(dsm_patches).cuda(), volatile=True)
 
             # Do the inference
-            outs, heatmap1, heatmap2 = net(image_patches, dsm_patches, mode='Test')
+            outs, heatmap1, heatmap2 = net(image_patches, dsm_patches, mode='Heatmap')
             outs = outs.data.cpu().numpy()
             
             image_patches = np.asarray(255 * torch.squeeze(image_patches).cpu(), dtype='uint8').transpose((1, 2, 0))
@@ -141,39 +153,88 @@ def test(net, test_ids, all=False, stride=WINDOW_SIZE[0], batch_size=1, window_s
             heatmap2 = cv2.applyColorMap(heatmap2, cv2.COLORMAP_JET)
             heatmap2 = heatmap2[:, :, (2, 1, 0)]
 
-            x_comp = 65
-            y_comp = 100
-            fig = plt.figure()
-            fig.add_subplot(1, 4, 1)
-            plt.imshow(image_patches)
-            # plt.title('CFNet', y=-0.1)
-            plt.axis('off')
-            
-            plt.gca().add_patch(plt.Rectangle((x_comp - 2, y_comp - 2), 2, 2, color='red', fill=False, linewidth=1))
-            
-            fig.add_subplot(1, 4, 2)
-            plt.imshow(heatmap1)
-            # heatmap_str = './CFNet_features' + str(featureid) + '.jpg'
-            # cv2.imwrite(heatmap_str, heatmap1)
-            plt.gca().add_patch(plt.Rectangle((x_comp - 2, y_comp - 2), 2, 2, color='red', fill=False, linewidth=1))
-            plt.axis('off')
-            fig.add_subplot(1, 4, 3)
-            plt.imshow(heatmap2)
-            # heatmap_str = './CFNet_features' + str(featureid+1) + '.jpg'
-            # cv2.imwrite(heatmap_str, heatmap2)
-            plt.gca().add_patch(plt.Rectangle((x_comp - 2, y_comp - 2), 2, 2, color='red', fill=False, linewidth=1))
-            plt.axis('off')
+            # --- 为该测试大图创建目录 ---
+            save_dir = f"./heatmaps/{test_id}"
+            os.makedirs(save_dir, exist_ok=True)
 
-            fig.add_subplot(1, 4, 4)
-            plt.imshow(gt_patches)
-            plt.gca().add_patch(plt.Rectangle((x_comp - 2, y_comp - 2), 2, 2, color='red', fill=False, linewidth=1))
-            clear_output()
-            plt.axis('off')
+            # --- 遍历 batch 内的每一个 patch ---
+            for pid, (x, y, w, h) in enumerate(coords):
+                # 1. RGB patch
+                img_patch = image_patches[pid].cpu().numpy().transpose((1, 2, 0))
+
+                # 2. GT patch
+                gt_patch = gt_patches[pid].cpu().numpy().transpose((1, 2, 0))
+
+                # 3. Heatmap1（RGB 分支）
+                h1 = heatmap1[pid]
+                h1 = cv2.resize(h1, (256, 256))
+                h1 = np.uint8(255 * h1)
+                h1 = cv2.applyColorMap(h1, cv2.COLORMAP_JET)
+                h1 = h1[:, :, ::-1]
+
+                # 4. Heatmap2（DSM 分支）
+                h2 = heatmap2[pid]
+                h2 = cv2.resize(h2, (256, 256))
+                h2 = np.uint8(255 * h2)
+                h2 = cv2.applyColorMap(h2, cv2.COLORMAP_JET)
+                h2 = h2[:, :, ::-1]
+
+                # 输出文件路径
+                out_path = f"{save_dir}/patch_{index:06d}_x{x}_y{y}.png"
+
+                # 将四张图拼成一张
+                fig = plt.figure(figsize=(10, 6))
+                ax1 = fig.add_subplot(1, 4, 1);
+                ax1.imshow(img_patch);
+                ax1.axis("off")
+                ax2 = fig.add_subplot(1, 4, 2);
+                ax2.imshow(h1);
+                ax2.axis("off")
+                ax3 = fig.add_subplot(1, 4, 3);
+                ax3.imshow(h2);
+                ax3.axis("off")
+                ax4 = fig.add_subplot(1, 4, 4);
+                ax4.imshow(gt_patch);
+                ax4.axis("off")
+
+                plt.savefig(out_path, dpi=300, bbox_inches='tight')
+                plt.close()
+
+                index += 1
+
+            # x_comp = 65
+            # y_comp = 100
+            # fig = plt.figure()
+            # fig.add_subplot(1, 4, 1)
+            # plt.imshow(image_patches)
+            # # plt.title('CFNet', y=-0.1)
+            # plt.axis('off')
+            #
+            # plt.gca().add_patch(plt.Rectangle((x_comp - 2, y_comp - 2), 2, 2, color='red', fill=False, linewidth=1))
+            #
+            # fig.add_subplot(1, 4, 2)
+            # plt.imshow(heatmap1)
+            # # heatmap_str = './CFNet_features' + str(featureid) + '.jpg'
+            # # cv2.imwrite(heatmap_str, heatmap1)
+            # plt.gca().add_patch(plt.Rectangle((x_comp - 2, y_comp - 2), 2, 2, color='red', fill=False, linewidth=1))
+            # plt.axis('off')
+            # fig.add_subplot(1, 4, 3)
+            # plt.imshow(heatmap2)
+            # # heatmap_str = './CFNet_features' + str(featureid+1) + '.jpg'
+            # # cv2.imwrite(heatmap_str, heatmap2)
+            # plt.gca().add_patch(plt.Rectangle((x_comp - 2, y_comp - 2), 2, 2, color='red', fill=False, linewidth=1))
+            # plt.axis('off')
+            #
+            # fig.add_subplot(1, 4, 4)
+            # plt.imshow(gt_patches)
+            # plt.gca().add_patch(plt.Rectangle((x_comp - 2, y_comp - 2), 2, 2, color='red', fill=False, linewidth=1))
+            # clear_output()
+            # plt.axis('off')
             
-            plt.show()
-            # plt.savefig('heatmap.png', dpi=1200)
-            plt.savefig('heatmap_lora_building'+str(index)+'.pdf', dpi=1200)
-            index += 1
+            # plt.show()
+            # # plt.savefig('heatmap.png', dpi=1200)
+            # plt.savefig('heatmap_lora_building'+str(index)+'.pdf', dpi=1200)
+            # index += 1
 
             # Fill in the results array
             for out, (x, y, w, h) in zip(outs, coords):
@@ -208,7 +269,7 @@ elif MODE == 'Test':
             io.imsave('./resultsv/inference_UNetFormer_{}_tile_{}.png'.format('huge', id_), img)
 
     elif DATASET == 'Potsdam':
-        net.load_state_dict(torch.load('./resultsp/YOUR_MODEL'), strict=False)
+        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch41_0.8573.pth'), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)

@@ -18,6 +18,7 @@ from torch.autograd import Variable
 from IPython.display import clear_output
 from UNetFormer_MMSAM import UNetFormer as MFNet
 
+from thop import profile, clever_format
 import random
 
 SEED = 42  # 你可以选择任意整数作为种子
@@ -53,13 +54,15 @@ def pad_patch(patch, target_h, target_w):
         out[:h, :w] = patch[:target_h,:target_w]
         return out
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 print("torch sees {} GPUs".format(torch.cuda.device_count()))
 print("Current device:", torch.cuda.current_device())
 print("Device name:", torch.cuda.get_device_name(torch.cuda.current_device()))
 
 net = MFNet(num_classes=N_CLASSES).cuda()
+
+
 
 params = 0
 for name, param in net.named_parameters():
@@ -196,7 +199,7 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
         epoch_mean_loss = np.mean(losses[max(0, iter_ - len(train_loader)):iter_])
         epoch_losses.append(epoch_mean_loss)
 
-        if e % save_epoch == 0 and e > 10:
+        if e % save_epoch == 0 and e > 15:
             train_time = time.time()
             print("Training time: {:.3f} seconds".format(train_time - start_time))
             net.eval()
@@ -230,7 +233,7 @@ if MODE == 'Train':
 
 elif MODE == 'Test':
     if DATASET == 'Vaihingen':
-        net.load_state_dict(torch.load('./resultsv/UNetformer_epoch31_0.8423784622411172'), strict=False)
+        net.load_state_dict(torch.load('./resultsv/UNetformer_epoch26_0.8484.pth'), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)
@@ -239,7 +242,7 @@ elif MODE == 'Test':
             io.imsave('./resultsv/inference_UNetFormer_{}_tile_{}.png'.format('huge', id_), img)
 
     elif DATASET == 'Potsdam':
-        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch54_0.8576.pth'), strict=False)
+        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch41_0.8573.pth'), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)

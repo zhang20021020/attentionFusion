@@ -535,12 +535,10 @@ class CIAPNet_Head(nn.Module):
         super(CIAPNet_Head, self).__init__()
         self.todevice = todevice
         self.ca_num_heads = num_classes
+
         self.ws3 = WS(decode_channels, num_classes)
         self.ws2 = WS(decode_channels, num_classes)
-        # 在 __init__ 中添加 BAM 模块
-        self.bam4 = BAM(decode_channels)
-        self.bam3 = BAM(decode_channels)
-        self.bam2 = BAM(decode_channels)
+
         self.bottleneck1 = ConvBNReLU(encoder_channels[0], decode_channels, kernel_size=3)
         self.bottleneck2 = ConvBNReLU(encoder_channels[1], decode_channels, kernel_size=3)
         self.bottleneck3 = ConvBNReLU(encoder_channels[2], decode_channels, kernel_size=3)
@@ -571,18 +569,18 @@ class CIAPNet_Head(nn.Module):
             x3 = self.bottleneck3(res3)
             x4 = self.bottleneck4(res4)
 
-            x4 = self.bam4(x4)  # 加入BAM
+
             x4_in = torch.chunk(x4, self.ca_num_heads, dim=1)
             s4_out = self.CaTTn4(x4_in)
             s4_out = F.interpolate(s4_out, scale_factor=2, mode='bilinear', align_corners=False)
 
-            x3 = self.bam3(x3)
+
             x3_list = self.ws3(x3, s4_out)
             x3_list = torch.chunk(x3_list, self.ca_num_heads, dim=1)
             s3_out = self.CaTTn3(x3_list)
             s3_out = F.interpolate(s3_out, scale_factor=2, mode='bilinear', align_corners=False)
 
-            x2 = self.bam2(x2)  # 加入BAM
+
             x2_list = self.ws2(x2, s3_out)
             x2_list = torch.chunk(x2_list, self.ca_num_heads, dim=1)
             s2_out = self.CaTTn2(x2_list)
@@ -602,18 +600,18 @@ class CIAPNet_Head(nn.Module):
             x3 = self.bottleneck3(res3)
             x4 = self.bottleneck4(res4)
 
-            x4 = self.bam4(x4) # 加入BAM
+
             x4_in = torch.chunk(x4, self.ca_num_heads, dim=1)
             s4_out = self.CaTTn4(x4_in)
             s4_out = F.interpolate(s4_out, scale_factor=2, mode='bilinear', align_corners=False)
 
-            x3 = self.bam3(x3)
+
             x3_list = self.ws3(x3, s4_out)
             x3_list = torch.chunk(x3_list, self.ca_num_heads, dim=1)
             s3_out = self.CaTTn3(x3_list)
             s3_out = F.interpolate(s3_out, scale_factor=2, mode='bilinear', align_corners=False)
 
-            x2 = self.bam2(x2)
+
             x2_list = self.ws2(x2, s3_out)
             x2_list = torch.chunk(x2_list, self.ca_num_heads, dim=1)
             s2_out = self.CaTTn2(x2_list)
@@ -784,6 +782,19 @@ class UNetFormer(nn.Module):
         self.fusion2 = SEFusion(encoder_channels[1])
         self.fusion3 = SEFusion(encoder_channels[2])
         self.fusion4 = SEFusion(encoder_channels[3])
+        # ✅ 新增：Encoder 金字塔 BAM
+        self.bam1 = BAM(encoder_channels[0])
+        self.bam2 = BAM(encoder_channels[1])
+        self.bam3 = BAM(encoder_channels[2])
+        self.bam4 = BAM(encoder_channels[3])
+        # ===== PANet Bottom-up path =====
+        self.down3 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1)
+        self.down4 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1)
+        self.down5 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1)
+
+        self.smooth3 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.smooth4 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.smooth5 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
 
         for n, value in self.image_encoder.named_parameters():
             if 'lora_' not in n:
@@ -820,11 +831,37 @@ class UNetFormer(nn.Module):
         res2 = self.fusion2(res2x, res2y)
         res3 = self.fusion3(res3x, res3y)
         res4 = self.fusion4(res4x, res4y)
+        # ✅ BAM 在融合后强化特征
+        res1 = self.bam1(res1)
+        res2 = self.bam2(res2)
+        res3 = self.bam3(res3)
+        res4 = self.bam4(res4)
+        ###############################################
+        # Bottom-Up Path (PANet)
+        ###############################################
+
+        # 上采样路径的输出作为 P2~P5 使用
+        P2, P3, P4, P5 = res1, res2, res3, res4
+
+        # N2 直接等于 P2
+        N2 = P2
+
+        # N3 = Down(N2) + P3
+        N3 = self.down3(N2) + P3
+        N3 = self.smooth3(N3)
+
+        # N4 = Down(N3) + P4
+        N4 = self.down4(N3) + P4
+        N4 = self.smooth4(N4)
+
+        # N5 = Down(N4) + P5
+        N5 = self.down5(N4) + P5
+        N5 = self.smooth5(N5)
 
         # ✅【修改2】【修改3】使用新 decoder，适配 x_list 输入形式，返回 sh 辅助输出
         if self.training:
-            x, sh = self.decoder([res1, res2, res3, res4])
+            x, sh = self.decoder([N2, N3, N4, N5])
             return x, sh
         else:
-            x = self.decoder([res1, res2, res3, res4])
+            x = self.decoder([N2, N3, N4, N5])
             return x
