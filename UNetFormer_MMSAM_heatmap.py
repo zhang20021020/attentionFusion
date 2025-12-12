@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -740,6 +739,19 @@ class FeatureRefinementHead(nn.Module):
         x = self.act(x)
 
         return x
+def gradcam_2d(feature, score):
+    """
+    feature: Tensor [B, C, h, w]   需要能回传梯度
+    score:   Tensor 标量（建议是 logits 的 mean/sum）
+    return:  heatmap numpy [h, w]  0~1
+    """
+    grads = torch.autograd.grad(score, feature, retain_graph=True, allow_unused=False)[0]  # [B,C,h,w]
+    weights = torch.mean(grads, dim=(2, 3), keepdim=True)                                 # [B,C,1,1]
+    cam = torch.sum(feature * weights, dim=1, keepdim=False)                              # [B,h,w]
+    cam = torch.relu(cam)
+    cam = cam - cam.amin(dim=(1,2), keepdim=True)
+    cam = cam / (cam.amax(dim=(1,2), keepdim=True) + 1e-6)
+    return cam
 
 class UNetFormer(nn.Module):
     def __init__(self,
@@ -777,22 +789,25 @@ class UNetFormer(nn.Module):
         )
         self.fpn3y = nn.Identity()
         self.fpn4y = nn.MaxPool2d(kernel_size=2, stride=2)
-        #  新增：Encoder 金字塔 BAM
-        self.bam1x = BAM(encoder_channels[0])
-        self.bam2x = BAM(encoder_channels[1])
-        self.bam3x = BAM(encoder_channels[2])
-        self.bam4x = BAM(encoder_channels[3])
 
-        self.bam1y = BAM(encoder_channels[0])
-        self.bam2y = BAM(encoder_channels[1])
-        self.bam3y = BAM(encoder_channels[2])
-        self.bam4y = BAM(encoder_channels[3])
 
         self.fusion1 = SEFusion(encoder_channels[0])
         self.fusion2 = SEFusion(encoder_channels[1])
         self.fusion3 = SEFusion(encoder_channels[2])
         self.fusion4 = SEFusion(encoder_channels[3])
+        # ✅ 新增：Encoder 金字塔 BAM
+        self.bam1 = BAM(encoder_channels[0])
+        self.bam2 = BAM(encoder_channels[1])
+        self.bam3 = BAM(encoder_channels[2])
+        self.bam4 = BAM(encoder_channels[3])
+        # ===== PANet Bottom-up path =====
+        self.down3 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1)
+        self.down4 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1)
+        self.down5 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1)
 
+        self.smooth3 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.smooth4 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.smooth5 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
 
         for n, value in self.image_encoder.named_parameters():
             if 'lora_' not in n:
@@ -800,7 +815,7 @@ class UNetFormer(nn.Module):
             else:
                 value.requires_grad = True
 
-        # 【修改1】使用 CIAPNet_Head 替换旧 decoder
+        # ✅【修改1】使用 CIAPNet_Head 替换旧 decoder
         self.decoder = CIAPNet_Head(
             encoder_channels=encoder_channels,
             decode_channels=num_classes * 32,  # CIAPNet 默认设置
@@ -809,109 +824,77 @@ class UNetFormer(nn.Module):
             num_classes=num_classes
         )
 
-        # （旧版 decoder 已注释保留）
+        # ❌（旧版 decoder 已注释保留）
         # self.decoder = Decoder(encoder_channels, decode_channels, dropout, window_size, num_classes)
 
     def forward(self, x, y, mode='Train'):
-        """
-        x: RGB, 形状通常是 (B, 3, H, W)
-        y: DSM, 可能是 (B, H, W) 或 (B, 1, H, W)
-        mode: 'Train' / 'Test' / 'Heatmap'
-        """
-        # ---------- 统一 y 的形状 ----------
-        # 支持 (B,H,W) 或 (B,1,H,W) 或 (B,3,H,W)
+        h, w = x.size()[-2:]
+        # y = torch.unsqueeze(y, dim=1).repeat(1, 3, 1, 1)
         if y.dim() == 3:
-            # (B, H, W) -> (B, 1, H, W)
+            # [B, H, W] → [B, 1, H, W]
             y = y.unsqueeze(1)
 
-        if y.dim() != 4:
-            raise ValueError(f"y 维度错误，期望 3D 或 4D，得到 {y.dim()}D, shape={y.shape}")
+        # 此时 y 一定是 [B, 1, H, W]
+        y = y.repeat(1, 3, 1, 1)
 
-        # 此时 y: (B, C, H, W)
-        if y.size(1) == 1:
-            # (B,1,H,W) -> (B,3,H,W)
-            y = y.repeat(1, 3, 1, 1)
-        elif y.size(1) == 3:
-            # 已经是 3 通道，保持不变
-            pass
-        else:
-            raise ValueError(f"y 通道数错误，期望 1 或 3，得到 {y.size(1)}, shape={y.shape}")
+        deepx, deepy = self.image_encoder(x, y)  # 256x16x16
 
-        h, w = x.size()[-2:]
+        res1x = self.fpn1x(deepx)
+        res2x = self.fpn2x(deepx)
+        res3x = self.fpn3x(deepx)
+        res4x = self.fpn4x(deepx)
+        res1y = self.fpn1y(deepy)
+        res2y = self.fpn2y(deepy)
+        res3y = self.fpn3y(deepy)
+        res4y = self.fpn4y(deepy)
 
-        # ---------- Encoder ----------
-        deepx, deepy = self.image_encoder(x, y)  # 这里的 deepx/deepy 需要参与梯度
-        heatmaps = [deepx, deepy]
-
-        # ---------- FPN + BAM ----------
-        res1x = self.bam1x(self.fpn1x(deepx))
-        res2x = self.bam2x(self.fpn2x(deepx))
-        res3x = self.bam3x(self.fpn3x(deepx))
-        res4x = self.bam4x(self.fpn4x(deepx))
-
-        res1y = self.bam1y(self.fpn1y(deepy))
-        res2y = self.bam2y(self.fpn2y(deepy))
-        res3y = self.bam3y(self.fpn3y(deepy))
-        res4y = self.bam4y(self.fpn4y(deepy))
 
         res1 = self.fusion1(res1x, res1y)
         res2 = self.fusion2(res2x, res2y)
         res3 = self.fusion3(res3x, res3y)
         res4 = self.fusion4(res4x, res4y)
+        # ✅ BAM 在融合后强化特征
+        res1 = self.bam1(res1)
+        res2 = self.bam2(res2)
+        res3 = self.bam3(res3)
+        res4 = self.bam4(res4)
+        ###############################################
+        # Bottom-Up Path (PANet)
+        ###############################################
 
-        x_list = [res1, res2, res3, res4]
+        # 上采样路径的输出作为 P2~P5 使用
+        P2, P3, P4, P5 = res1, res2, res3, res4
 
-        # ---------- Train 模式 ----------
-        if mode == 'Train':
-            # CIAPNet_Head：训练时返回 (x, sh)
-            x, sh = self.decoder(x_list)
+        # N2 直接等于 P2
+        N2 = P2
+
+        # N3 = Down(N2) + P3
+        N3 = self.down3(N2) + P3
+        N3 = self.smooth3(N3)
+
+        # N4 = Down(N3) + P4
+        N4 = self.down4(N3) + P4
+        N4 = self.smooth4(N4)
+
+        # N5 = Down(N4) + P5
+        N5 = self.down5(N4) + P5
+        N5 = self.smooth5(N5)
+        if mode == 'VIS':
+            x = self.decoder([N2, N3, N4, N5])
+
+            cam_class = 1  # buildings
+            score = x[:, cam_class].mean()
+
+            cam_rgb = gradcam_2d(deepx, score)
+            cam_dsm = gradcam_2d(deepy, score)
+
+            return x, cam_rgb, cam_dsm
+
+
+        elif self.training:
+            x, sh = self.decoder([N2, N3, N4, N5])
             return x, sh
 
-        # ---------- Test 模式 ----------
-        if mode == 'Test':
-            # 推理时只需要语义分割输出
-            x = self.decoder(x_list)
+        else:
+            x = self.decoder([N2, N3, N4, N5])
             return x
-
-        # ---------- Heatmap 模式 ----------
-        if mode == 'Heatmap':
-            # Heatmap 建议强制 batch=1
-            assert x.size(0) == 1, "Heatmap 模式必须 batch=1"
-
-            # decoder 正常前向（保持与 Test 一致）
-            x = self.decoder(x_list)  # shape: (1, num_classes, H, W)
-
-            # 你原来是固定取 (1, 100, 65)，这里保持不变
-            # 也可以改成 argmax 的位置，这里先不动
-            pred = x[0, 1, 100, 65]
-
-            heatmap_outputs = []
-            for feature in heatmaps:
-                # feature: (B, C, Hf, Wf)
-                grads = autograd.grad(pred, feature, retain_graph=True)[0]  # (B, C, Hf, Wf)
-                # GAP over Hf, Wf
-                pooled_grads = torch.mean(grads, dim=(2, 3))[0]  # (C,)
-                feature_map = feature[0]  # (C, Hf, Wf)
-
-                # 每个通道乘以对应权重
-                feature_map = feature_map * pooled_grads[:, None, None]
-
-                # 转成 numpy
-                heatmap = feature_map.detach().cpu().numpy()
-                heatmap = np.mean(heatmap, axis=0)  # (Hf, Wf)
-
-                heatmap = np.maximum(heatmap, 0)
-                maxv = np.max(heatmap)
-                if maxv > 0:
-                    heatmap /= maxv
-
-                heatmap_outputs.append(heatmap)
-
-            heatmap1 = heatmap_outputs[0]
-            heatmap2 = heatmap_outputs[1] if len(heatmap_outputs) > 1 else None
-
-            return x, heatmap1, heatmap2
-
-        # ---------- 兜底 ----------
-        raise ValueError("mode 必须为 'Train' / 'Test' / 'Heatmap'")
-

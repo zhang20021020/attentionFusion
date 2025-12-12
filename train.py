@@ -18,7 +18,7 @@ from torch.autograd import Variable
 from IPython.display import clear_output
 from UNetFormer_MMSAM import UNetFormer as MFNet
 
-from thop import profile, clever_format
+
 import random
 
 SEED = 42  # 你可以选择任意整数作为种子
@@ -54,7 +54,7 @@ def pad_patch(patch, target_h, target_w):
         out[:h, :w] = patch[:target_h,:target_w]
         return out
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
 
 print("torch sees {} GPUs".format(torch.cuda.device_count()))
 print("Current device:", torch.cuda.current_device())
@@ -233,7 +233,7 @@ if MODE == 'Train':
 
 elif MODE == 'Test':
     if DATASET == 'Vaihingen':
-        net.load_state_dict(torch.load('./resultsv/UNetformer_epoch26_0.8484.pth'), strict=False)
+        net.load_state_dict(torch.load('F:\model\modelsv/UNetformer_epoch26_0.8484.pth'), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)
