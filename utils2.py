@@ -12,11 +12,12 @@ import os
 # Parameters
 ## SwinFusion
 WINDOW_SIZE = (256, 256)  # Patch size
-
+# WINDOW_SIZE = (1024, 1024) # Patch size
 STRIDE = 32  # Stride for testing
 IN_CHANNELS = 3  # Number of input channels (e.g. RGB)
-# FOLDER = "/ISPRS_dataset/" # Replace with your "/path/to/the/ISPRS/dataset/folder/"
+# FOLDER = "/media/lscsc/nas/xianping/ISPRS_dataset/" # Replace with your "/path/to/the/ISPRS/dataset/folder/"
 FOLDER = "F:/ISPRS_dataset/ISPRS_dataset/"
+# OLDER = "/home/tsy/ISPRS_dataset/"
 BATCH_SIZE = 5
 # BATCH_SIZE = 4 # For backbone ViT-Huge
 
@@ -39,13 +40,16 @@ invert_palette = {v: k for k, v in palette.items()}
 
 MODEL = 'UNetformer'
 # MODEL = 'FTUNetformer'
-MODE = 'Train'
+# MODE = 'Train'
+MODE = 'VIS'
+# MODE = 'FPS'
 # MODE = 'Test'
+
 DATASET = 'Vaihingen'
 # DATASET = 'Potsdam'
 IF_SAM = True
 # IF_SAM = False
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 if DATASET == 'Vaihingen':
     train_ids = ['1', '3', '23', '26', '7', '11', '13', '28', '17', '32', '34', '37']
@@ -53,7 +57,7 @@ if DATASET == 'Vaihingen':
     # train_ids = ['1']
     # test_ids = ['5']
     Stride_Size = 32
-    epochs = 35
+    epochs = 50
     save_epoch = 1
     MAIN_FOLDER = FOLDER + 'Vaihingen/'
     DATA_FOLDER = MAIN_FOLDER + 'top/top_mosaic_09cm_area{}.tif'
@@ -65,7 +69,7 @@ elif DATASET == 'Potsdam':
                  '4_12', '6_8', '6_12', '6_7', '4_11']
     test_ids = ['4_10', '5_11', '2_11', '3_10', '6_11', '7_12']
     Stride_Size = 128
-    epochs = 30
+    epochs = 50
     save_epoch = 1
     MAIN_FOLDER = FOLDER + 'Potsdam/'
     DATA_FOLDER = MAIN_FOLDER + '4_Ortho_RGBIR/top_potsdam_{}_RGBIR.tif'
@@ -87,6 +91,17 @@ def convert_to_color(arr_2d, palette=palette):
         arr_3d[m] = i
 
     return arr_3d
+
+
+def set_seed(seed=42):
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def convert_from_color(arr_3d, palette=invert_palette):
@@ -247,6 +262,28 @@ def get_random_pos(img, window_shape):
     y1 = random.randint(0, H - h - 1)
     y2 = y1 + h
     return x1, x2, y1, y2
+
+
+def dice_loss(output: torch.Tensor, target: torch.Tensor, eps=1e-6):
+    """
+    output: B×C×H×W (raw logits)
+    target: B×H×W  (ground‐truth labels 0..C-1)
+    """
+    # 1) 先做 softmax 得到每个类别的预测概率
+    probs = F.softmax(output, dim=1)  # B×C×H×W
+
+    # 2) one‐hot 编码 target
+    B, C, H, W = output.shape
+    with torch.no_grad():
+        target_onehot = F.one_hot(target, num_classes=C)  # B×H×W×C
+        target_onehot = target_onehot.permute(0, 3, 1, 2).float()  # B×C×H×W
+
+    # 3) 计算每个类别的 dice
+    dims = (0, 2, 3)  # over batch + spatial dims
+    intersection = torch.sum(probs * target_onehot, dims)
+    cardinality = torch.sum(probs + target_onehot, dims)
+    dice_score = (2. * intersection + eps) / (cardinality + eps)  # C‐vector
+    return 1. - dice_score.mean()  # 标量
 
 
 def CrossEntropy2d(input, target, weight=None, size_average=True):

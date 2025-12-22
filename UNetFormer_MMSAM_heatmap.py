@@ -532,7 +532,13 @@ class UNetFormer(nn.Module):
 
     def forward(self, x, y, mode='Train'):
         h, w = x.size()[-2:]
-        y = torch.unsqueeze(y, dim=1).repeat(1,3,1,1)
+        # y = torch.unsqueeze(y, dim=1).repeat(1, 3, 1, 1)
+        if y.dim() == 3:
+            # [B, H, W] → [B, 1, H, W]
+            y = y.unsqueeze(1)
+
+        # 此时 y 一定是 [B, 1, H, W]
+        y = y.repeat(1, 3, 1, 1)
         deepx, deepy = self.image_encoder(x, y) # 256*16*16
         heatmaps = []
         heatmaps.append(deepx)
@@ -546,49 +552,21 @@ class UNetFormer(nn.Module):
         res2y = self.fpn2y(deepy)
         res3y = self.fpn3y(deepy)
         res4y = self.fpn4y(deepy)
-        res1 = self.fusion1(res1x, res1y)
-        res2 = self.fusion2(res2x, res2y)
-        res3 = self.fusion3(res3x, res3y)
-        res4 = self.fusion4(res4x, res4y)
+
+        res1 = self.fusion1(res1x, res1y)  # 64*64
+        res2 = self.fusion2(res2x, res2y)  # 32*32
+        res3 = self.fusion3(res3x, res3y)  # 16*16
+        res4 = self.fusion4(res4x, res4y)  # 8*8
 
         x = self.decoder(res1, res2, res3, res4, h, w)
-        
-        # ## without PFF:
-        # res4 = deepx + deepy
-        # x = self.decoder(res4, h, w)
-        pred = x[:, 1, 100, 65]
-        ## heatmap
-        feature = heatmaps[0]
-        feature_grad = autograd.grad(pred, feature, allow_unused=True, retain_graph=True)[0]
-        grads = feature_grad  # 获取梯度
-        pooled_grads = torch.nn.functional.adaptive_avg_pool2d(grads, (1, 1))
-        # 此处batch size默认为1，所以去掉了第0维（batch size维）
-        pooled_grads = pooled_grads[0]
-        feature = feature[0]
-        # print("pooled_grads:", pooled_grads.shape)
-        # print("feature:", feature.shape)
-        # feature.shape[0]是指定层feature的通道数
-        for i in range(feature.shape[0]):
-            feature[i, ...] *= pooled_grads[i, ...]
-        heatmap = feature.detach().cpu().numpy()
-        heatmap = np.mean(heatmap, axis=0)
-        heatmap1 = np.maximum(heatmap, 0)
-        heatmap1 /= np.max(heatmap1)
-        
-        feature = heatmaps[1]
-        feature_grad = autograd.grad(pred, feature, allow_unused=True, retain_graph=True)[0]
-        grads = feature_grad  # 获取梯度
-        pooled_grads = torch.nn.functional.adaptive_avg_pool2d(grads, (1, 1))
-        # 此处batch size默认为1，所以去掉了第0维（batch size维）
-        pooled_grads = pooled_grads[0]
-        feature = feature[0]
-        # print("pooled_grads:", pooled_grads.shape)
-        # print("feature:", feature.shape)
-        # feature.shape[0]是指定层feature的通道数
-        for i in range(feature.shape[0]):
-            feature[i, ...] *= pooled_grads[i, ...]
-        heatmap = feature.detach().cpu().numpy()
-        heatmap = np.mean(heatmap, axis=0)
-        heatmap2 = np.maximum(heatmap, 0)
-        heatmap2 /= np.max(heatmap2)
-        return x, heatmap1, heatmap2
+        if mode == 'Heatmap':
+            return x
+        if mode == 'Train':
+
+
+            return x,
+
+        # ---------- Test 模式 ----------
+        if mode == 'Test':
+
+            return x

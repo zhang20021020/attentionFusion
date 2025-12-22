@@ -41,7 +41,7 @@ def pad_patch(patch, target_h, target_w):
         out[:h, :w] = patch[:target_h,:target_w]
         return out
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 print("torch sees {} GPUs".format(torch.cuda.device_count()))
 print("Current device:", torch.cuda.current_device())
@@ -175,7 +175,7 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
             iter_ += 1
             del data, target, loss
 
-        if e % save_epoch == 0:
+        if e % save_epoch == 0 and e>20:
             train_time = time.time()
             print("Training time: {:.3f} seconds".format(train_time - start_time))
             net.eval()
