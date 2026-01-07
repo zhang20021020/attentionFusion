@@ -41,7 +41,7 @@ def pad_patch(patch, target_h, target_w):
         out[:h, :w] = patch[:target_h,:target_w]
         return out
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 print("torch sees {} GPUs".format(torch.cuda.device_count()))
 print("Current device:", torch.cuda.current_device())
