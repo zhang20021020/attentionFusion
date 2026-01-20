@@ -5,6 +5,7 @@ from einops import rearrange, repeat
 import numpy as np
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 import timm
+from safetensors.torch import load_file
 import cv2
 from mamba_ssm import Mamba
 from PyramidMamba import ManBaBlock
@@ -911,13 +912,21 @@ class TwoBranchBackbone(nn.Module):
         super().__init__()
 
         # 1) RGB 分支
+        # 1.创建backbone
         self.rgb_backbone = timm.create_model(
-            backbone_name, features_only=True, pretrained=pretrained,
+            backbone_name, features_only=True, pretrained=False,
             out_indices=out_indices, in_chans=3
         )
+        # 2. 加载本地权重
+        state_dict = load_file(
+            "/home/zhangben/pretrained/swinv2_large_window12to16_192to256.safetensors"
+        )
+
+        # 3. 加载参数（必须 strict=False）
+        self.rgb_backbone.load_state_dict(state_dict, strict=False)
         # 2) DSM 分支
         self.dsm_backbone = timm.create_model(
-            backbone_name, features_only=True, pretrained=pretrained,
+            backbone_name, features_only=True, pretrained=False,
             out_indices=out_indices, in_chans=1
         )
 

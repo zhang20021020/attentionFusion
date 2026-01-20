@@ -16,7 +16,8 @@ import torch.nn.init
 from utils import *
 from torch.autograd import Variable
 from IPython.display import clear_output
-from UNetFormer_MMSAM import UNetFormer as MFNet
+# from UNetFormer_MMSAM import UNetFormer as MFNet
+from DoubleSwinMambnClean import UNetFormer_TwoModal as MFNet
 try:
     from urllib.request import URLopener
 except ImportError:
@@ -41,7 +42,7 @@ def pad_patch(patch, target_h, target_w):
         out[:h, :w] = patch[:target_h,:target_w]
         return out
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 print("torch sees {} GPUs".format(torch.cuda.device_count()))
 print("Current device:", torch.cuda.current_device())
@@ -52,18 +53,31 @@ net = MFNet(num_classes=N_CLASSES).cuda()
 params = 0
 for name, param in net.named_parameters():
     params += param.nelement()
-print('All Params:   ', params)
 
-params1 = 0
-params2 = 0
-for name, param in net.image_encoder.named_parameters():
-    if "lora_" not in name:
-        params1 += param.nelement()
-    else:
-        params2 += param.nelement()
-print('ImgEncoder:   ', params1)
-print('Lora:         ', params2)
-print('Others:       ', params - params1 - params2)
+params_rgb = sum(p.numel() for p in net.encoder.rgb_backbone.parameters())
+params_dsm = sum(p.numel() for p in net.encoder.dsm_backbone.parameters())
+params_encoder = params_rgb + params_dsm
+params_non_backbone = (
+    sum(p.numel() for p in net.parameters())
+    - params_encoder
+)
+
+print(f"All Params        : {params:,}")
+print(f"RGB Backbone      : {params_rgb:,}")
+print(f"DSM Backbone      : {params_dsm:,}")
+print(f"Encoder (Total)   : {params_encoder:,}")
+print(f"Decoder + Others  : {params_non_backbone:,}")
+
+# params1 = 0
+# params2 = 0
+# for name, param in net.encoder.rgb_backbone.named_parameters():
+#     if "lora_" not in name:
+#         params1 += param.nelement()
+#     else:
+#         params2 += param.nelement()
+# print('ImgEncoder:   ', params1)
+# print('Lora:         ', params2)
+# print('Others:       ', params - params1 - params2)
 
 print("training : ", train_ids)
 print("testing  : ", test_ids)
@@ -175,7 +189,7 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
             iter_ += 1
             del data, target, loss
 
-        if e % save_epoch == 0:
+        if e % save_epoch == 0 and e>20:
             train_time = time.time()
             print("Training time: {:.3f} seconds".format(train_time - start_time))
             net.eval()
