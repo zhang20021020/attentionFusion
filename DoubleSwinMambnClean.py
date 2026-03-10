@@ -3,12 +3,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 import numpy as np
+from sympy import false
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 import timm
 from safetensors.torch import load_file
 import cv2
 from mamba_ssm import Mamba
 from PyramidMamba import ManBaBlock
+import copy
 
 class Norm2d(nn.Module):
     def __init__(self, embed_dim):
@@ -905,30 +907,31 @@ class TwoBranchBackbone(nn.Module):
     然后在同一 scale 上做 SEFusion 融合。
     """
     def __init__(self,
-                 backbone_name: str = 'swinv2_base_window16_256',
+                 backbone_name: str = 'swinv2_large_window12to16_192to256.safetensors',
                  pretrained: bool = True,
                  out_indices: tuple = (1, 3),
                  out_ch: int = 256):
         super().__init__()
 
-        # 1) RGB 分支
-        # 1.创建backbone
+        state_dict = load_file("/home/zhangben/pretrained/swinv2_large_window12to16_192to256.safetensors")
+
+        # RGB
         self.rgb_backbone = timm.create_model(
             backbone_name, features_only=True, pretrained=False,
             out_indices=out_indices, in_chans=3
         )
-        # 2. 加载本地权重
-        state_dict = load_file(
-            "/home/zhangben/pretrained/swinv2_large_window12to16_192to256.safetensors"
-        )
-
-        # 3. 加载参数（必须 strict=False）
         self.rgb_backbone.load_state_dict(state_dict, strict=False)
-        # 2) DSM 分支
+
+        # DSM
         self.dsm_backbone = timm.create_model(
             backbone_name, features_only=True, pretrained=False,
             out_indices=out_indices, in_chans=1
         )
+        dsm_state_dict = copy.deepcopy(state_dict)
+        if "patch_embed.proj.weight" in dsm_state_dict:
+            dsm_state_dict["patch_embed.proj.weight"] = dsm_state_dict["patch_embed.proj.weight"].mean(dim=1,
+                                                                                                       keepdim=True)
+        self.dsm_backbone.load_state_dict(dsm_state_dict, strict=False)
 
         # 原 backbone 在 out_indices 处的通道数
         rgb_c1, rgb_c2 = self.rgb_backbone.feature_info.channels()
