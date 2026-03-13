@@ -3,6 +3,7 @@ from glob import glob
 # from tqdm import tqdm_notebook as tqdm  # 已移除进度条
 from sklearn.metrics import confusion_matrix
 import time
+from tqdm import tqdm
 import cv2
 import itertools
 import matplotlib.pyplot as plt
@@ -23,7 +24,7 @@ try:
 except ImportError:
     from urllib import URLopener
 
-
+set_seed(42)
 # Helper: pad or crop a patch to fixed size
 def pad_patch(patch, target_h, target_w):
     """Pad or crop patch to (target_h, target_w)."""
@@ -84,7 +85,9 @@ print("testing  : ", test_ids)
 train_set    = ISPRS_dataset(train_ids, cache=CACHE)
 train_loader = torch.utils.data.DataLoader(train_set, batch_size=BATCH_SIZE)
 
-base_lr    = 0.01
+base_lr = 6e-4
+weight_decay = 5e-4
+# base_lr    = 0.01
 params_dict = dict(net.named_parameters())
 params_list = []
 for key, value in params_dict.items():
@@ -93,7 +96,7 @@ for key, value in params_dict.items():
     else:
         params_list += [{'params': [value], 'lr': base_lr / 2}]
 
-optimizer = optim.SGD(net.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0005)
+optimizer = optim.SGD(net.parameters(), lr=base_lr, momentum=0.9, weight_decay=weight_decay)
 scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [25, 35, 45], gamma=0.1)
 
 
@@ -115,30 +118,34 @@ def test(net, test_ids, all=False, stride=WINDOW_SIZE[0], batch_size=BATCH_SIZE,
     all_gts   = []
 
     with torch.no_grad():
-        for img, dsm, gt, gt_e in zip(test_images, test_dsms, test_labels, eroded_labels):
+        for img, dsm, gt, gt_e in tqdm(zip(test_images, test_dsms, test_labels, eroded_labels), total=len(test_ids), leave=False):
             pred = np.zeros(img.shape[:2] + (N_CLASSES,))
 
             total = count_sliding_window(img, step=stride, window_size=window_size) // batch_size
-            for i, coords in enumerate(grouper(batch_size, sliding_window(img, step=stride, window_size=window_size))):
+            for i, coords in enumerate(
+                    tqdm(grouper(batch_size, sliding_window(img, step=stride, window_size=window_size)), total=total,
+                        leave=False)):
+                # Build the tensor
                 image_patches = [np.copy(img[x:x + w, y:y + h]).transpose((2, 0, 1)) for x, y, w, h in coords]
                 image_patches = np.asarray(image_patches)
                 image_patches = Variable(torch.from_numpy(image_patches).cuda(), volatile=True)
 
-                mn, mx = dsm.min(), dsm.max()
-                norm_dsm = (dsm - mn) / (mx - mn)
-                dsm_patches = [np.copy(norm_dsm[x:x + w, y:y + h]) for x, y, w, h in coords]
+                min = np.min(dsm)
+                max = np.max(dsm)
+                dsm = (dsm - min) / (max - min)
+                dsm_patches = [np.copy(dsm[x:x + w, y:y + h]) for x, y, w, h in coords]
                 dsm_patches = np.asarray(dsm_patches)
                 dsm_patches = Variable(torch.from_numpy(dsm_patches).cuda(), volatile=True)
 
-
-
+                # Do the inference
                 outs = net(image_patches, dsm_patches, mode='Test')
                 outs = outs.data.cpu().numpy()
 
+                # Fill in the results array
                 for out, (x, y, w, h) in zip(outs, coords):
                     out = out.transpose((1, 2, 0))
                     pred[x:x + w, y:y + h] += out
-                del outs
+                del (outs)
 
             pred = np.argmax(pred, axis=-1)
             all_preds.append(pred)
@@ -189,7 +196,7 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
             iter_ += 1
             del data, target, loss
 
-        if e % save_epoch == 0 and e>20:
+        if e % save_epoch == 0 and e>=10:
             train_time = time.time()
             print("Training time: {:.3f} seconds".format(train_time - start_time))
             net.eval()

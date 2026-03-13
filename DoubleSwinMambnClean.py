@@ -907,35 +907,36 @@ class TwoBranchBackbone(nn.Module):
     然后在同一 scale 上做 SEFusion 融合。
     """
     def __init__(self,
-                 backbone_name: str = 'swinv2_large_window12to16_192to256.safetensors',
-                 pretrained: bool = True,
-                 out_indices: tuple = (1, 3),
-                 out_ch: int = 256):
+                 backbone_name='swinv2_large_window12to16_192to256_22kft1k',
+                 pretrained=True,
+                 out_indices=(1, 3),
+                 out_ch=256,
+                 weight_path='/home/zhangben/pretrained/model.safetensors'):
         super().__init__()
 
-        state_dict = load_file("/home/zhangben/pretrained/swinv2_large_window12to16_192to256.safetensors")
-
-        # RGB
+        # RGB 分支
         self.rgb_backbone = timm.create_model(
-            backbone_name, features_only=True, pretrained=False,
-            out_indices=out_indices, in_chans=3
+            backbone_name,
+            features_only=True,
+            pretrained=pretrained,
+            pretrained_cfg_overlay=dict(file=weight_path) if weight_path else None,
+            out_indices=out_indices,
+            in_chans=3
         )
-        self.rgb_backbone.load_state_dict(state_dict, strict=False)
 
-        # DSM
+        # DSM 分支
         self.dsm_backbone = timm.create_model(
-            backbone_name, features_only=True, pretrained=False,
-            out_indices=out_indices, in_chans=1
+            backbone_name,
+            features_only=True,
+            pretrained=pretrained,
+            pretrained_cfg_overlay=dict(file=weight_path) if weight_path else None,
+            out_indices=out_indices,
+            in_chans=1
         )
-        dsm_state_dict = copy.deepcopy(state_dict)
-        if "patch_embed.proj.weight" in dsm_state_dict:
-            dsm_state_dict["patch_embed.proj.weight"] = dsm_state_dict["patch_embed.proj.weight"].mean(dim=1,
-                                                                                                       keepdim=True)
-        self.dsm_backbone.load_state_dict(dsm_state_dict, strict=False)
 
-        # 原 backbone 在 out_indices 处的通道数
         rgb_c1, rgb_c2 = self.rgb_backbone.feature_info.channels()
         dsm_c1, dsm_c2 = self.dsm_backbone.feature_info.channels()
+
 
         # 3) 统一到 out_ch
         self.to256_rgb_low  = nn.Conv2d(rgb_c1, out_ch, 1, bias=False) if rgb_c1  != out_ch else nn.Identity()
