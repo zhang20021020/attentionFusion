@@ -118,13 +118,11 @@ def test(net, test_ids, all=False, stride=WINDOW_SIZE[0], batch_size=BATCH_SIZE,
     all_gts   = []
 
     with torch.no_grad():
-        for img, dsm, gt, gt_e in tqdm(zip(test_images, test_dsms, test_labels, eroded_labels), total=len(test_ids), leave=False):
+        for img, dsm, gt, gt_e in zip(test_images, test_dsms, test_labels, eroded_labels) :
             pred = np.zeros(img.shape[:2] + (N_CLASSES,))
 
             total = count_sliding_window(img, step=stride, window_size=window_size) // batch_size
-            for i, coords in enumerate(
-                    tqdm(grouper(batch_size, sliding_window(img, step=stride, window_size=window_size)), total=total,
-                        leave=False)):
+            for i, coords in enumerate(grouper(batch_size, sliding_window(img, step=stride, window_size=window_size))):
                 # Build the tensor
                 image_patches = [np.copy(img[x:x + w, y:y + h]).transpose((2, 0, 1)) for x, y, w, h in coords]
                 image_patches = np.asarray(image_patches)
@@ -168,7 +166,7 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
     weights = weights.cuda()
 
     iter_     = 0
-    MIoU_best = 0.8
+    MIoU_best = 0.82
     for e in range(1, epochs + 1):
         if scheduler is not None:
             scheduler.step()
