@@ -313,7 +313,8 @@ class ManBaBlock(nn.Module):
                  expand: int = 2,
                  last_feat_size: int = 16):
         super().__init__()
-        # 先做 SSM + 多尺度拼接 + 投射回 in_chs
+
+        # 1) Mamba 主分支：输出仍然是 in_chs
         self.mamba = MultiHeadMambaLayer(
             in_chs=in_chs,
             dim=dim,
@@ -322,20 +323,36 @@ class ManBaBlock(nn.Module):
             expand=expand,
             last_feat_size=last_feat_size
         )
-        # 这里 conv_ffn 的输入通道一定是 in_chs（因为 MambaLayer.proj 输出 in_chs）
+
+        # 2) 残差前归一化
+        self.mamba_norm = nn.BatchNorm2d(in_chs)
+        self.ffn_norm = nn.BatchNorm2d(in_chs)
+
+        # 3) FFN 分支：先保持通道数不变，方便残差
         self.conv_ffn = nn.Sequential(
             nn.Conv2d(in_chs, hidden_ch, kernel_size=1, bias=False),
             nn.GELU(),
             nn.Dropout(drop),
-            nn.Conv2d(hidden_ch, out_ch, kernel_size=1, bias=False),
+            nn.Conv2d(hidden_ch, in_chs, kernel_size=1, bias=False),
             nn.Dropout(drop),
         )
 
-    def forward(self, x):
-        x = self.mamba(x)    # -> [B, in_chs, H, W]
-        x = self.conv_ffn(x) # -> [B, out_ch, H, W]
-        return x
+        # 4) 最后再把通道映射到 decoder_channels / out_ch
+        self.proj_out = nn.Conv2d(in_chs, out_ch, kernel_size=1, bias=False)
 
+    def forward(self, x):
+        # x: [B, in_chs, H, W]
+
+        # Mamba 残差
+        x = x + self.mamba(self.mamba_norm(x))
+
+        # FFN 残差
+        x = x + self.conv_ffn(self.ffn_norm(x))
+
+        # 最后输出到 out_ch
+        x = self.proj_out(x)
+
+        return x
 
 
 class Decoder(nn.Module):
