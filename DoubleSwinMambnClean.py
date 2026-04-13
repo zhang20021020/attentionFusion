@@ -363,6 +363,58 @@ class SqueezeAndExcitation(nn.Module):
         y = x * weighting
         return y
 
+class AdaptiveGatedFusion(nn.Module):
+    def __init__(self, channels, reduction=4):
+        super().__init__()
+        hidden = max(channels // reduction, 16)
+
+        # 先分别对两路特征做轻量投影
+        self.rgb_proj = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU()
+        )
+        self.dsm_proj = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU()
+        )
+
+        # 门控分支：根据两路特征联合生成 gate
+        self.gate_net = nn.Sequential(
+            nn.Conv2d(channels * 2, hidden, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.GELU(),
+            nn.Conv2d(hidden, channels, kernel_size=1, bias=True),
+            nn.Sigmoid()
+        )
+
+        # 融合后再做一次轻量 refinement
+        self.out_proj = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU()
+        )
+
+        # 残差缩放系数，可学习更稳
+        self.res_scale = nn.Parameter(torch.tensor(0.5))
+
+    def forward(self, rgb_feat, dsm_feat):
+        rgb = self.rgb_proj(rgb_feat)
+        dsm = self.dsm_proj(dsm_feat)
+
+        # 拼接后生成逐通道 gate
+        gate = self.gate_net(torch.cat([rgb, dsm], dim=1))   # [B, C, H, W]
+
+        # 自适应融合
+        fused = gate * rgb + (1.0 - gate) * dsm
+
+        # 残差保底，避免门控学偏
+        residual = 0.5 * (rgb_feat + dsm_feat)
+        out = fused + self.res_scale * residual
+
+        out = self.out_proj(out)
+        return out
 
 class SEFusion(nn.Module):
     def __init__(self, channels_in, activation=nn.ReLU(inplace=True)):
@@ -806,6 +858,24 @@ class MambaLayer(nn.Module):
         out = self.proj(out)  # ✅ 通道数回到 256
         return out
 
+class AuxSegHead(nn.Module):
+    """
+    轻量辅助分割头
+    输入: [B, C, H, W]
+    输出: [B, num_classes, H, W]
+    """
+    def __init__(self, in_channels, num_classes):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.GELU(),
+            nn.Dropout2d(0.1),
+            nn.Conv2d(in_channels, num_classes, kernel_size=1)
+        )
+
+    def forward(self, x):
+        return self.block(x)
 
 class DecoderBlock(nn.Module):
     def __init__(self, ch, heads=8, window_size=8):
@@ -818,81 +888,121 @@ class DecoderBlock(nn.Module):
         x = self.conv(x)
         x = x + self.attn(x)
         return x
-
-
 class PMDecoder(nn.Module):
-    """基于 PyramidMamba 的改进解码器：用带注意力的 DecoderBlock 逐步上采样"""
-    def __init__(
-        self,
-        in_chs_low: int = 64,
-        in_chs_high: int = 512,
-        decoder_channels: int = 128,
-        num_classes: int = 6,
-        last_feat_size: int = 16,
-        n_heads: int = 8,
-        window_size: int = 8,
-    ):
+    """
+    三尺度解码器 + 中间辅助监督
+    x_high -> ManBaBlock -> up -> fuse(x_mid) -> aux_head
+                                 -> up -> fuse(x_low) -> seg_head
+    """
+    def __init__(self,
+                 in_chs_low: int,
+                 in_chs_mid: int,
+                 in_chs_high: int,
+                 decoder_channels: int = 128,
+                 num_classes: int = 6,
+                 last_feat_size: int = 16,
+                 use_aux: bool = True):
         super().__init__()
-        # 最深分辨率的 ManBaBlock
-        self.b3 = ManBaBlock(in_chs=in_chs_high,
-                             dim=decoder_channels,
-                             last_feat_size=last_feat_size)
 
-        # — 在 H/16 上做一次全局 SSM 建模 —
-        self.mamba_mid = MambaLayer(
+        self.use_aux = use_aux
+
+        # low / mid / high 统一到 decoder_channels
+        self.low_proj = nn.Sequential(
+            nn.Conv2d(in_chs_low, decoder_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(decoder_channels),
+            nn.GELU()
+        )
+
+        self.mid_proj = nn.Sequential(
+            nn.Conv2d(in_chs_mid, decoder_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(decoder_channels),
+            nn.GELU()
+        )
+
+        self.high_proj = nn.Sequential(
+            nn.Conv2d(in_chs_high, decoder_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(decoder_channels),
+            nn.GELU()
+        )
+
+        # deepest feature enhancement
+        self.b3 = ManBaBlock(
             in_chs=decoder_channels,
-            dim=decoder_channels // 2,
-            d_state=16,  # 保持与最深层一致
-            d_conv=4,
-            expand=2,
-            last_feat_size=last_feat_size * 2  # H/16 对应的“格点数”
+            dim=decoder_channels,
+            hidden_ch=decoder_channels * 4,
+            out_ch=decoder_channels,
+            last_feat_size=last_feat_size
         )
 
-        # 用 3 个 DecoderBlock：H/32→16, 16→8, 8→4
-        self.up1 = DecoderBlock(decoder_channels, heads=n_heads, window_size=window_size)
-        self.up2 = DecoderBlock(decoder_channels, heads=n_heads, window_size=window_size)
-        self.up3 = DecoderBlock(decoder_channels, heads=n_heads, window_size=window_size)
-
-        # 浅层特征降维到 decoder_channels
-        self.pre_conv = ConvBNReLU(in_chs_low, decoder_channels)
-
-        # 最后的分类头：H/4→H/2→H
-        self.head = nn.Sequential(
-            ConvBNReLU(decoder_channels, decoder_channels // 2),
+        # high -> mid
+        self.up_high_to_mid = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            ConvBNReLU(decoder_channels // 2, decoder_channels // 2),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            Conv(decoder_channels // 2, num_classes, kernel_size=1)
+            nn.Conv2d(decoder_channels, decoder_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(decoder_channels),
+            nn.GELU()
         )
 
-        self.apply(self._init_weights)
+        # mid -> low
+        self.up_mid_to_low = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(decoder_channels, decoder_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(decoder_channels),
+            nn.GELU()
+        )
 
-    def forward(self, x_low, x_high):
-        # x_high: H/32
-        x = self.b3(x_high)      # still H/32, channels=decoder_channels
+        # 这里你可以替换成 SkipFusion / SpatialGatedSkipFusion / GatedSkipFusion
+        self.fuse_mid = SkipFusion(decoder_channels)
+        self.fuse_low = SkipFusion(decoder_channels)
 
-        x = self.up1(x)          # H/32 -> H/16
-       # x = self.mamba_mid(x)  # 在中间尺度做全局 Mamba 建模
+        # 主输出头
+        self.seg_head = nn.Sequential(
+            nn.Conv2d(decoder_channels, decoder_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(decoder_channels),
+            nn.GELU(),
+            nn.Dropout2d(0.1),
+            nn.Conv2d(decoder_channels, num_classes, kernel_size=1)
+        )
 
-        x = self.up2(x)          # H/16 -> H/8
-        x = self.up3(x)          # H/8  -> H/4
+        # 辅助输出头：接在 mid 融合后
+        if self.use_aux:
+            self.aux_head = AuxSegHead(decoder_channels, num_classes)
 
-        # x_low: H/8 -> project to decoder_channels, 再 align 到 H/4
-        x_low = self.pre_conv(x_low)
-        if x_low.shape[-2:] != x.shape[-2:]:
-            x_low = F.interpolate(
-                x_low,
-                size = x.shape[-2:],
-                mode='bilinear',
-                align_corners=False
-            )
+    def forward(self, x_low, x_mid, x_high):
+        # 通道统一
+        x_low = self.low_proj(x_low)
+        x_mid = self.mid_proj(x_mid)
+        x_high = self.high_proj(x_high)
 
-        # 融合浅/深层
-        x = x + x_low
+        # deepest feature
+        x = self.b3(x_high)
 
-        # 最终分类
-        x = self.head(x)
-        return x
+        # high -> mid
+        x = self.up_high_to_mid(x)
+        if x.shape[-2:] != x_mid.shape[-2:]:
+            x = F.interpolate(x, size=x_mid.shape[-2:], mode='bilinear', align_corners=False)
+
+        x = self.fuse_mid(x, x_mid)
+
+        # 中间辅助输出
+        aux_out = None
+        if self.use_aux:
+            aux_out = self.aux_head(x)
+
+        # mid -> low
+        x = self.up_mid_to_low(x)
+        if x.shape[-2:] != x_low.shape[-2:]:
+            x = F.interpolate(x, size=x_low.shape[-2:], mode='bilinear', align_corners=False)
+
+        x = self.fuse_low(x, x_low)
+
+        # 主输出
+        main_out = self.seg_head(x)
+
+        if self.use_aux:
+            return main_out, aux_out
+        else:
+            return main_out
+
 
     @staticmethod
     def _init_weights(m):
@@ -901,18 +1011,31 @@ class PMDecoder(nn.Module):
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
+import torch
+import torch.nn as nn
+import timm
+
+
 class TwoBranchBackbone(nn.Module):
     """
-    RGB / DSM 两路骨干，各自输出 two scales (low≈H/8, high≈H/32)，
-    然后在同一 scale 上做 SEFusion 融合。
+    RGB / DSM 双分支骨干，输出 three scales:
+        low  : 浅层特征
+        mid  : 中间层特征
+        high : 深层特征
+
+    默认 out_indices=(0, 1, 3)，适合后续 decoder 做:
+        high -> up -> fuse(mid) -> up -> fuse(low)
     """
     def __init__(self,
                  backbone_name='swinv2_large_window12to16_192to256_22kft1k',
                  pretrained=True,
-                 out_indices=(1, 3),
+                 out_indices=(0, 1, 3),
                  out_ch=256,
                  weight_path='/home/zhangben/pretrained/model.safetensors'):
         super().__init__()
+
+        self.out_indices = out_indices
+        self.out_ch = out_ch
 
         # RGB 分支
         self.rgb_backbone = timm.create_model(
@@ -934,26 +1057,43 @@ class TwoBranchBackbone(nn.Module):
             in_chans=1
         )
 
-        rgb_c1, rgb_c2 = self.rgb_backbone.feature_info.channels()
-        dsm_c1, dsm_c2 = self.dsm_backbone.feature_info.channels()
+        # 读取每个尺度的通道数
+        rgb_channels = self.rgb_backbone.feature_info.channels()
+        dsm_channels = self.dsm_backbone.feature_info.channels()
 
+        if len(rgb_channels) != 3 or len(dsm_channels) != 3:
+            raise ValueError(
+                f"当前版本要求 backbone 输出 3 个尺度特征，"
+                f"但 rgb_channels={rgb_channels}, dsm_channels={dsm_channels}。"
+                f"请确认 out_indices 是否为 3 个元素，例如 (0,1,3) 或 (1,2,3)。"
+            )
 
-        # 3) 统一到 out_ch
-        self.to256_rgb_low  = nn.Conv2d(rgb_c1, out_ch, 1, bias=False) if rgb_c1  != out_ch else nn.Identity()
-        self.to256_rgb_high = nn.Conv2d(rgb_c2, out_ch, 1, bias=False) if rgb_c2  != out_ch else nn.Identity()
-        self.to256_dsm_low  = nn.Conv2d(dsm_c1, out_ch, 1, bias=False) if dsm_c1  != out_ch else nn.Identity()
-        self.to256_dsm_high = nn.Conv2d(dsm_c2, out_ch, 1, bias=False) if dsm_c2  != out_ch else nn.Identity()
+        rgb_c1, rgb_c2, rgb_c3 = rgb_channels
+        dsm_c1, dsm_c2, dsm_c3 = dsm_channels
 
-        # 4) SE 融合
-        self.fuse = CBAMFusion(out_ch)
-        #self.fuse = CrossAttentionFusion(channels=out_ch)
+        # 统一到 out_ch
+        self.to_out_rgb_low  = nn.Conv2d(rgb_c1, out_ch, 1, bias=False) if rgb_c1 != out_ch else nn.Identity()
+        self.to_out_rgb_mid  = nn.Conv2d(rgb_c2, out_ch, 1, bias=False) if rgb_c2 != out_ch else nn.Identity()
+        self.to_out_rgb_high = nn.Conv2d(rgb_c3, out_ch, 1, bias=False) if rgb_c3 != out_ch else nn.Identity()
+
+        self.to_out_dsm_low  = nn.Conv2d(dsm_c1, out_ch, 1, bias=False) if dsm_c1 != out_ch else nn.Identity()
+        self.to_out_dsm_mid  = nn.Conv2d(dsm_c2, out_ch, 1, bias=False) if dsm_c2 != out_ch else nn.Identity()
+        self.to_out_dsm_high = nn.Conv2d(dsm_c3, out_ch, 1, bias=False) if dsm_c3 != out_ch else nn.Identity()
+
+        # 三个尺度分别融合
+        self.fuse_low  = AdaptiveGatedFusion(out_ch)
+        self.fuse_mid  = AdaptiveGatedFusion(out_ch)
+        self.fuse_high = AdaptiveGatedFusion(out_ch)
 
     def _adapt_img_size(self, backbone: nn.Module, x: torch.Tensor):
         """让 Swin 的 patch_embed.img_size 与输入一致"""
         m = getattr(backbone, 'model', backbone)
-        if not hasattr(m, 'patch_embed'): return
+        if not hasattr(m, 'patch_embed'):
+            return
         pe = m.patch_embed
-        if not hasattr(pe, 'img_size'): return
+        if not hasattr(pe, 'img_size'):
+            return
+
         H, W = x.shape[-2:]
         if pe.img_size != (H, W):
             pe.img_size = (H, W)
@@ -962,13 +1102,16 @@ class TwoBranchBackbone(nn.Module):
                 pe.grid_size = (H // ph, W // pw)
 
     def _to_nchw(self, feat: torch.Tensor):
-        # 有些 timm backbone 在 features_only 时会返回 NHWC
+        """
+        有些 timm backbone 在 features_only 时可能返回 NHWC
+        这里转成 NCHW
+        """
         if feat.ndim == 4 and feat.shape[1] < feat.shape[-1]:
             feat = feat.permute(0, 3, 1, 2).contiguous()
         return feat
 
     def forward(self, rgb: torch.Tensor, dsm: torch.Tensor):
-        # —— shape guard for DSM ——
+        # ---- shape guard for DSM ----
         if dsm.ndim == 3:         # [B,H,W]
             dsm = dsm.unsqueeze(1)
         elif dsm.ndim == 2:       # [H,W]
@@ -976,68 +1119,167 @@ class TwoBranchBackbone(nn.Module):
         elif dsm.ndim == 5:       # e.g. [B,1,1,H,W]
             dsm = dsm.squeeze(1)
 
-        # —— patch_embed img_size adaptation ——
+        # ---- patch_embed img_size adaptation ----
         self._adapt_img_size(self.rgb_backbone, rgb)
         self._adapt_img_size(self.dsm_backbone, dsm)
 
-        # —— extract features at two scales ——
-        rgb_low,  rgb_high  = self.rgb_backbone(rgb)
-        dsm_low,  dsm_high  = self.dsm_backbone(dsm)
+        # ---- extract features at three scales ----
+        rgb_feats = self.rgb_backbone(rgb)
+        dsm_feats = self.dsm_backbone(dsm)
 
-        # —— ensure NCHW for each ——
-        rgb_low, rgb_high = map(self._to_nchw, (rgb_low, rgb_high))
-        dsm_low, dsm_high = map(self._to_nchw, (dsm_low, dsm_high))
+        if len(rgb_feats) != 3 or len(dsm_feats) != 3:
+            raise RuntimeError(
+                f"期望 backbone 输出 3 个尺度，但实际 rgb={len(rgb_feats)}, dsm={len(dsm_feats)}"
+            )
 
-        # —— channel align to out_ch ——
-        rgb_low  = self.to256_rgb_low (rgb_low)
-        rgb_high = self.to256_rgb_high(rgb_high)
-        dsm_low  = self.to256_dsm_low (dsm_low)
-        dsm_high = self.to256_dsm_high(dsm_high)
+        rgb_low, rgb_mid, rgb_high = rgb_feats
+        dsm_low, dsm_mid, dsm_high = dsm_feats
 
-        # —— 融合 on same scales ——
-        low  = self.fuse(rgb_low,  dsm_low)   # [B,out_ch,H/8, W/8]
-        high = self.fuse(rgb_high, dsm_high)  # [B,out_ch,H/32,W/32]
+        # ---- ensure NCHW ----
+        rgb_low, rgb_mid, rgb_high = map(self._to_nchw, (rgb_low, rgb_mid, rgb_high))
+        dsm_low, dsm_mid, dsm_high = map(self._to_nchw, (dsm_low, dsm_mid, dsm_high))
 
-        # 直接相加融合
-        # low = rgb_low + dsm_low
-        # high = rgb_high + dsm_high
+        # ---- channel align to out_ch ----
+        rgb_low  = self.to_out_rgb_low(rgb_low)
+        rgb_mid  = self.to_out_rgb_mid(rgb_mid)
+        rgb_high = self.to_out_rgb_high(rgb_high)
 
-        return low, high
+        dsm_low  = self.to_out_dsm_low(dsm_low)
+        dsm_mid  = self.to_out_dsm_mid(dsm_mid)
+        dsm_high = self.to_out_dsm_high(dsm_high)
 
+        # ---- adaptive fusion on same scales ----
+        low  = self.fuse_low(rgb_low, dsm_low)
+        mid  = self.fuse_mid(rgb_mid, dsm_mid)
+        high = self.fuse_high(rgb_high, dsm_high)
+
+        return low, mid, high
+
+class SkipFusion(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.fuse = nn.Sequential(
+            nn.Conv2d(channels * 2, channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU(),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU()
+        )
+
+    def forward(self, up_feat, skip_feat):
+        x = torch.cat([up_feat, skip_feat], dim=1)
+        x = self.fuse(x)
+        return x
+
+class GatedSkipFusion(nn.Module):
+    def __init__(self, channels, reduction=4):
+        super().__init__()
+        hidden = max(channels // reduction, 16)
+
+        # 先对两路特征做轻量对齐/增强
+        self.up_proj = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU()
+        )
+        self.skip_proj = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU()
+        )
+
+        # 生成 gate，按通道+空间进行控制
+        self.gate = nn.Sequential(
+            nn.Conv2d(channels * 2, hidden, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.GELU(),
+            nn.Conv2d(hidden, channels, kernel_size=1, bias=True),
+            nn.Sigmoid()
+        )
+
+        # 融合后 refinement
+        self.out = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU(),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU()
+        )
+
+        # 残差保底，更稳
+        self.res_scale = nn.Parameter(torch.tensor(0.5))
+
+    def forward(self, up_feat, skip_feat):
+        up = self.up_proj(up_feat)
+        skip = self.skip_proj(skip_feat)
+
+        # gate 越大越偏向 skip，越小越偏向 up
+        gate = self.gate(torch.cat([up, skip], dim=1))
+
+        fused = gate * skip + (1.0 - gate) * up
+
+        # 残差保底，避免 gate 学偏
+        residual = 0.5 * (up_feat + skip_feat)
+        out = fused + self.res_scale * residual
+
+        out = self.out(out)
+        return out
 
 class UNetFormer_TwoModal(nn.Module):
     """
-    最终网络：TwoBranchBackbone + PMDecoder。
-    只接收融合后的 low/high 特征，输出分割图。
+    最终网络：Three-Scale TwoBranchBackbone + PMDecoder(with aux supervision)
     """
     def __init__(self,
                  num_classes: int = 6,
                  decode_channels: int = 128,
-                  #backbone_name: str = 'swinv2_large_window12_192_22k',
                  backbone_name: str = 'swinv2_large_window12to16_192to256_22kft1k',
-                 #backbone_name: str = 'swinv2_base_window16_256',
                  last_feat_size: int = 16,
-                 out_ch: int = 256):
+                 out_ch: int = 256,
+                 use_aux: bool = True):
         super().__init__()
-        # 编码器：先各自提特征再融合
+
+        self.use_aux = use_aux
+
         self.encoder = TwoBranchBackbone(
             backbone_name=backbone_name,
             pretrained=True,
-            out_indices=(1, 3),
+            out_indices=(0, 1, 3),
             out_ch=out_ch
         )
 
         self.decoder = PMDecoder(
             in_chs_low=out_ch,
+            in_chs_mid=out_ch,
             in_chs_high=out_ch,
             decoder_channels=decode_channels,
             num_classes=num_classes,
-            last_feat_size=last_feat_size
+            last_feat_size=last_feat_size,
+            use_aux=use_aux
         )
 
     def forward(self, rgb: torch.Tensor, dsm: torch.Tensor, mode=None):
-        # rgb: [B,3,H,W], dsm: [B,1,H,W]
-        low, high = self.encoder(rgb, dsm)
-        out = self.decoder(low, high)  # [B,num_classes,≈H/4,W/4] or similar
-        # 上采样回原始分辨率
-        return F.interpolate(out, size=rgb.shape[-2:], mode='bilinear', align_corners=False)
+        low, mid, high = self.encoder(rgb, dsm)
+
+        if self.use_aux:
+            main_out, aux_out = self.decoder(low, mid, high)
+
+            main_out = F.interpolate(
+                main_out, size=rgb.shape[-2:], mode='bilinear', align_corners=False
+            )
+            aux_out = F.interpolate(
+                aux_out, size=rgb.shape[-2:], mode='bilinear', align_corners=False
+            )
+
+            if mode == 'Train':
+                return main_out, aux_out
+            else:
+                return main_out
+
+        else:
+            main_out = self.decoder(low, mid, high)
+            main_out = F.interpolate(
+                main_out, size=rgb.shape[-2:], mode='bilinear', align_corners=False
+            )
+            return main_out

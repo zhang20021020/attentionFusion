@@ -159,55 +159,87 @@ def test(net, test_ids, all=False, stride=WINDOW_SIZE[0], batch_size=BATCH_SIZE,
     else:
         return accuracy
 
-
-def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1):
+def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1, aux_weight=0.4):
     losses      = np.zeros(1000000)
     mean_losses = np.zeros(100000000)
     weights = weights.cuda()
 
     iter_     = 0
     MIoU_best = 0.82
+
     for e in range(1, epochs + 1):
-        if scheduler is not None:
-            scheduler.step()
         net.train()
         start_time = time.time()
+
         for batch_idx, (data, dsm, target) in enumerate(train_loader):
-            data, dsm, target = Variable(data.cuda()), Variable(dsm.cuda()), Variable(target.cuda())
+            data   = Variable(data.cuda())
+            dsm    = Variable(dsm.cuda())
+            target = Variable(target.cuda())
+
             optimizer.zero_grad()
+
             output = net(data, dsm, mode='Train')
-            loss = CrossEntropy2d(output, target, weight=weights)
+
+            # 兼容：有辅助监督时返回 (main_out, aux_out)，没有时返回 main_out
+            if isinstance(output, tuple):
+                main_out, aux_out = output
+                loss_main = CrossEntropy2d(main_out, target, weight=weights)
+                loss_aux  = CrossEntropy2d(aux_out,  target, weight=weights)
+                loss = loss_main + aux_weight * loss_aux
+            else:
+                main_out = output
+                loss = CrossEntropy2d(main_out, target, weight=weights)
+
             loss.backward()
             optimizer.step()
 
-            losses[iter_] = loss.data
-            mean_losses[iter_] = np.mean(losses[max(0, iter_ - 100):iter_])
+            losses[iter_] = loss.item()
+            mean_losses[iter_] = np.mean(losses[max(0, iter_ - 100):iter_ + 1])
 
             if iter_ % 100 == 0:
                 clear_output()
                 rgb  = np.asarray(255 * np.transpose(data.data.cpu().numpy()[0], (1, 2, 0)), dtype='uint8')
-                pred = np.argmax(output.data.cpu().numpy()[0], axis=0)
+                pred = np.argmax(main_out.data.cpu().numpy()[0], axis=0)
                 gt   = target.data.cpu().numpy()[0]
-                print('Train (epoch {}/{}) [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tAccuracy: {}'.format(
-                    e, epochs, batch_idx, len(train_loader),
-                    100. * batch_idx / len(train_loader), loss.data, accuracy(pred, gt)))
-            iter_ += 1
-            del data, target, loss
 
-        if e % save_epoch == 0 and e>=10:
+                if isinstance(output, tuple):
+                    print('Train (epoch {}/{}) [{}/{} ({:.0f}%)]\t'
+                          'Loss: {:.6f}\tMain: {:.6f}\tAux: {:.6f}\tAccuracy: {}'.format(
+                          e, epochs, batch_idx, len(train_loader),
+                          100. * batch_idx / len(train_loader),
+                          loss.item(), loss_main.item(), loss_aux.item(), accuracy(pred, gt)))
+                else:
+                    print('Train (epoch {}/{}) [{}/{} ({:.0f}%)]\t'
+                          'Loss: {:.6f}\tAccuracy: {}'.format(
+                          e, epochs, batch_idx, len(train_loader),
+                          100. * batch_idx / len(train_loader),
+                          loss.item(), accuracy(pred, gt)))
+
+            iter_ += 1
+            del data, dsm, target, loss
+
+        # 把 scheduler.step() 放到 optimizer.step() 之后、每个 epoch 结束时
+        if scheduler is not None:
+            scheduler.step()
+
+        if e % save_epoch == 0 and e >= 10:
             train_time = time.time()
             print("Training time: {:.3f} seconds".format(train_time - start_time))
+
             net.eval()
             MIoU = test(net, test_ids, all=False, stride=Stride_Size)
             net.train()
+
             test_time = time.time()
             print("Test time: {:.3f} seconds".format(test_time - train_time))
+
             if MIoU > MIoU_best:
                 if DATASET == 'Vaihingen':
                     torch.save(net.state_dict(), './resultsv/{}_epoch{}_{}'.format(MODEL, e, MIoU))
                 elif DATASET == 'Potsdam':
                     torch.save(net.state_dict(), './resultsp/{}_epoch{}_{}'.format(MODEL, e, MIoU))
                 MIoU_best = MIoU
+
     print('MIoU_best: ', MIoU_best)
 
 
