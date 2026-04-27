@@ -39,10 +39,10 @@ invert_palette = {v: k for k, v in palette.items()}
 
 MODEL = 'UNetformer'
 # MODEL = 'FTUNetformer'
-# MODE = 'Train'
-MODE = 'Test'
-DATASET = 'Vaihingen'
-# DATASET = 'Potsdam'
+MODE = 'Train'
+# MODE = 'Test'
+# DATASET = 'Vaihingen'
+DATASET = 'Potsdam'
 IF_SAM = True
 # IF_SAM = False
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
