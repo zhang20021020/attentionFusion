@@ -981,11 +981,11 @@ class TwoBranchBackbone(nn.Module):
     不再引入编码端额外门控实验。
     """
     def __init__(self,
-                 backbone_name='swinv2_large_window12to16_192to256_22kft1k',
+                 backbone_name='convnext_base',
                  pretrained=True,
                  out_indices=(0, 1, 3),
                  out_ch=256,
-                 weight_path='/home/zhangben/pretrained/model.safetensors'):
+                 weight_path='/home/zhangben/mamba/attentionFusion/weights/convnext/convnext_base.pth'):
         super().__init__()
 
         self.rgb_backbone = timm.create_model(
@@ -1082,7 +1082,7 @@ class UNetFormer_TwoModal(nn.Module):
     def __init__(self,
                  num_classes: int = 6,
                  decode_channels: int = 128,
-                 backbone_name: str = 'swinv2_large_window12to16_192to256_22kft1k',
+                 backbone_name: str = 'convnext_base',
                  last_feat_size: int = 16,
                  out_ch: int = 256):
         super().__init__()
