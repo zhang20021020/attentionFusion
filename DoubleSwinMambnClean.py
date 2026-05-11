@@ -872,38 +872,42 @@ class SpatialGatedSkipFusion(nn.Module):
 
 class PMDecoder(nn.Module):
     """
-    只保留两项有效改动：
-    1) 增加中间尺度
-    2) skip 连接改为门控融合
+    四尺度 Pyramid-Mamba Decoder:
+    stage4(high) -> stage3 -> stage2 -> stage1(low)
     """
     def __init__(self,
-                 in_chs_low: int = 256,
-                 in_chs_mid: int = 256,
-                 in_chs_high: int = 256,
+                 in_chs_s1: int = 256,
+                 in_chs_s2: int = 256,
+                 in_chs_s3: int = 256,
+                 in_chs_s4: int = 256,
                  decoder_channels: int = 128,
                  num_classes: int = 6,
                  last_feat_size: int = 16):
         super().__init__()
 
-        # 三层特征先统一到 decoder_channels
-        self.low_proj = nn.Sequential(
-            nn.Conv2d(in_chs_low, decoder_channels, kernel_size=1, bias=False),
+        self.s1_proj = nn.Sequential(
+            nn.Conv2d(in_chs_s1, decoder_channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(decoder_channels),
             nn.GELU()
         )
-        self.mid_proj = nn.Sequential(
-            nn.Conv2d(in_chs_mid, decoder_channels, kernel_size=1, bias=False),
+        self.s2_proj = nn.Sequential(
+            nn.Conv2d(in_chs_s2, decoder_channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(decoder_channels),
             nn.GELU()
         )
-        self.high_proj = nn.Sequential(
-            nn.Conv2d(in_chs_high, decoder_channels, kernel_size=1, bias=False),
+        self.s3_proj = nn.Sequential(
+            nn.Conv2d(in_chs_s3, decoder_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(decoder_channels),
+            nn.GELU()
+        )
+        self.s4_proj = nn.Sequential(
+            nn.Conv2d(in_chs_s4, decoder_channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(decoder_channels),
             nn.GELU()
         )
 
-        # 保留你当前残差版 ManBaBlock
-        self.b3 = ManBaBlock(
+        # 最深层做 Mamba 全局建模
+        self.b4 = ManBaBlock(
             in_chs=decoder_channels,
             dim=decoder_channels,
             hidden_ch=decoder_channels * 4,
@@ -911,25 +915,30 @@ class PMDecoder(nn.Module):
             last_feat_size=last_feat_size
         )
 
-        # high -> mid
-        self.up_high_to_mid = nn.Sequential(
+        self.up_4_to_3 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
             nn.Conv2d(decoder_channels, decoder_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(decoder_channels),
             nn.GELU()
         )
 
-        # mid -> low
-        self.up_mid_to_low = nn.Sequential(
+        self.up_3_to_2 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
             nn.Conv2d(decoder_channels, decoder_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(decoder_channels),
             nn.GELU()
         )
 
-        # 用升级后的门控 skip 融合替代简单相加
-        self.fuse_mid = SpatialGatedSkipFusion(decoder_channels)
-        self.fuse_low = SpatialGatedSkipFusion(decoder_channels)
+        self.up_2_to_1 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(decoder_channels, decoder_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(decoder_channels),
+            nn.GELU()
+        )
+
+        self.fuse_s3 = SpatialGatedSkipFusion(decoder_channels)
+        self.fuse_s2 = SpatialGatedSkipFusion(decoder_channels)
+        self.fuse_s1 = SpatialGatedSkipFusion(decoder_channels)
 
         self.seg_head = nn.Sequential(
             nn.Conv2d(decoder_channels, decoder_channels, kernel_size=3, padding=1, bias=False),
@@ -940,25 +949,32 @@ class PMDecoder(nn.Module):
 
         self.apply(self._init_weights)
 
-    def forward(self, x_low, x_mid, x_high):
-        x_low  = self.low_proj(x_low)
-        x_mid  = self.mid_proj(x_mid)
-        x_high = self.high_proj(x_high)
+    def forward(self, x_s1, x_s2, x_s3, x_s4):
+        x_s1 = self.s1_proj(x_s1)
+        x_s2 = self.s2_proj(x_s2)
+        x_s3 = self.s3_proj(x_s3)
+        x_s4 = self.s4_proj(x_s4)
 
-        # deepest feature
-        x = self.b3(x_high)
+        # stage4: deepest feature
+        x = self.b4(x_s4)
 
-        # high -> mid
-        x = self.up_high_to_mid(x)
-        if x.shape[-2:] != x_mid.shape[-2:]:
-            x = F.interpolate(x, size=x_mid.shape[-2:], mode='bilinear', align_corners=False)
-        x = self.fuse_mid(x, x_mid)
+        # stage4 -> stage3
+        x = self.up_4_to_3(x)
+        if x.shape[-2:] != x_s3.shape[-2:]:
+            x = F.interpolate(x, size=x_s3.shape[-2:], mode='bilinear', align_corners=False)
+        x = self.fuse_s3(x, x_s3)
 
-        # mid -> low
-        x = self.up_mid_to_low(x)
-        if x.shape[-2:] != x_low.shape[-2:]:
-            x = F.interpolate(x, size=x_low.shape[-2:], mode='bilinear', align_corners=False)
-        x = self.fuse_low(x, x_low)
+        # stage3 -> stage2
+        x = self.up_3_to_2(x)
+        if x.shape[-2:] != x_s2.shape[-2:]:
+            x = F.interpolate(x, size=x_s2.shape[-2:], mode='bilinear', align_corners=False)
+        x = self.fuse_s2(x, x_s2)
+
+        # stage2 -> stage1
+        x = self.up_2_to_1(x)
+        if x.shape[-2:] != x_s1.shape[-2:]:
+            x = F.interpolate(x, size=x_s1.shape[-2:], mode='bilinear', align_corners=False)
+        x = self.fuse_s1(x, x_s1)
 
         out = self.seg_head(x)
         return out
@@ -972,18 +988,16 @@ class PMDecoder(nn.Module):
 
 class TwoBranchBackbone(nn.Module):
     """
-    RGB / DSM 两路骨干，输出 three scales:
-        low  : 浅层特征
-        mid  : 中间层特征
-        high : 深层特征
-
-    这里只保留你原来的同尺度静态融合（CBAMFusion），
-    不再引入编码端额外门控实验。
+    RGB / DSM 双分支 ConvNeXt 编码器，输出 four scales:
+        s1: 浅层高分辨率特征
+        s2: 中低层特征
+        s3: 中高层特征
+        s4: 深层语义特征
     """
     def __init__(self,
                  backbone_name='convnext_base',
                  pretrained=True,
-                 out_indices=(0, 1, 3),
+                 out_indices=(0, 1, 2, 3),
                  out_ch=256,
                  weight_path='/home/zhangben/mamba/attentionFusion/weights/convnext/convnext_base.pth'):
         super().__init__()
@@ -1006,20 +1020,24 @@ class TwoBranchBackbone(nn.Module):
             in_chans=1
         )
 
-        rgb_c1, rgb_c2, rgb_c3 = self.rgb_backbone.feature_info.channels()
-        dsm_c1, dsm_c2, dsm_c3 = self.dsm_backbone.feature_info.channels()
+        rgb_c1, rgb_c2, rgb_c3, rgb_c4 = self.rgb_backbone.feature_info.channels()
+        dsm_c1, dsm_c2, dsm_c3, dsm_c4 = self.dsm_backbone.feature_info.channels()
 
-        # 统一到 out_ch
-        self.to256_rgb_low  = nn.Conv2d(rgb_c1, out_ch, 1, bias=False) if rgb_c1 != out_ch else nn.Identity()
-        self.to256_rgb_mid  = nn.Conv2d(rgb_c2, out_ch, 1, bias=False) if rgb_c2 != out_ch else nn.Identity()
-        self.to256_rgb_high = nn.Conv2d(rgb_c3, out_ch, 1, bias=False) if rgb_c3 != out_ch else nn.Identity()
+        self.to256_rgb_s1 = nn.Conv2d(rgb_c1, out_ch, 1, bias=False) if rgb_c1 != out_ch else nn.Identity()
+        self.to256_rgb_s2 = nn.Conv2d(rgb_c2, out_ch, 1, bias=False) if rgb_c2 != out_ch else nn.Identity()
+        self.to256_rgb_s3 = nn.Conv2d(rgb_c3, out_ch, 1, bias=False) if rgb_c3 != out_ch else nn.Identity()
+        self.to256_rgb_s4 = nn.Conv2d(rgb_c4, out_ch, 1, bias=False) if rgb_c4 != out_ch else nn.Identity()
 
-        self.to256_dsm_low  = nn.Conv2d(dsm_c1, out_ch, 1, bias=False) if dsm_c1 != out_ch else nn.Identity()
-        self.to256_dsm_mid  = nn.Conv2d(dsm_c2, out_ch, 1, bias=False) if dsm_c2 != out_ch else nn.Identity()
-        self.to256_dsm_high = nn.Conv2d(dsm_c3, out_ch, 1, bias=False) if dsm_c3 != out_ch else nn.Identity()
+        self.to256_dsm_s1 = nn.Conv2d(dsm_c1, out_ch, 1, bias=False) if dsm_c1 != out_ch else nn.Identity()
+        self.to256_dsm_s2 = nn.Conv2d(dsm_c2, out_ch, 1, bias=False) if dsm_c2 != out_ch else nn.Identity()
+        self.to256_dsm_s3 = nn.Conv2d(dsm_c3, out_ch, 1, bias=False) if dsm_c3 != out_ch else nn.Identity()
+        self.to256_dsm_s4 = nn.Conv2d(dsm_c4, out_ch, 1, bias=False) if dsm_c4 != out_ch else nn.Identity()
 
-        # 继续保留你原来的融合策略，不再额外改编码端
-        self.fuse = CBAMFusion(out_ch)
+        # 建议四个尺度不要共用同一个融合模块
+        self.fuse_s1 = CBAMFusion(out_ch)
+        self.fuse_s2 = CBAMFusion(out_ch)
+        self.fuse_s3 = CBAMFusion(out_ch)
+        self.fuse_s4 = CBAMFusion(out_ch)
 
     def _adapt_img_size(self, backbone: nn.Module, x: torch.Tensor):
         m = getattr(backbone, 'model', backbone)
@@ -1051,59 +1069,63 @@ class TwoBranchBackbone(nn.Module):
         self._adapt_img_size(self.rgb_backbone, rgb)
         self._adapt_img_size(self.dsm_backbone, dsm)
 
-        rgb_low, rgb_mid, rgb_high = self.rgb_backbone(rgb)
-        dsm_low, dsm_mid, dsm_high = self.dsm_backbone(dsm)
+        rgb_s1, rgb_s2, rgb_s3, rgb_s4 = self.rgb_backbone(rgb)
+        dsm_s1, dsm_s2, dsm_s3, dsm_s4 = self.dsm_backbone(dsm)
 
-        rgb_low, rgb_mid, rgb_high = map(self._to_nchw, (rgb_low, rgb_mid, rgb_high))
-        dsm_low, dsm_mid, dsm_high = map(self._to_nchw, (dsm_low, dsm_mid, dsm_high))
+        rgb_s1, rgb_s2, rgb_s3, rgb_s4 = map(self._to_nchw, (rgb_s1, rgb_s2, rgb_s3, rgb_s4))
+        dsm_s1, dsm_s2, dsm_s3, dsm_s4 = map(self._to_nchw, (dsm_s1, dsm_s2, dsm_s3, dsm_s4))
 
-        rgb_low  = self.to256_rgb_low(rgb_low)
-        rgb_mid  = self.to256_rgb_mid(rgb_mid)
-        rgb_high = self.to256_rgb_high(rgb_high)
+        rgb_s1 = self.to256_rgb_s1(rgb_s1)
+        rgb_s2 = self.to256_rgb_s2(rgb_s2)
+        rgb_s3 = self.to256_rgb_s3(rgb_s3)
+        rgb_s4 = self.to256_rgb_s4(rgb_s4)
 
-        dsm_low  = self.to256_dsm_low(dsm_low)
-        dsm_mid  = self.to256_dsm_mid(dsm_mid)
-        dsm_high = self.to256_dsm_high(dsm_high)
+        dsm_s1 = self.to256_dsm_s1(dsm_s1)
+        dsm_s2 = self.to256_dsm_s2(dsm_s2)
+        dsm_s3 = self.to256_dsm_s3(dsm_s3)
+        dsm_s4 = self.to256_dsm_s4(dsm_s4)
 
-        low  = self.fuse(rgb_low,  dsm_low)
-        mid  = self.fuse(rgb_mid,  dsm_mid)
-        high = self.fuse(rgb_high, dsm_high)
+        s1 = self.fuse_s1(rgb_s1, dsm_s1)
+        s2 = self.fuse_s2(rgb_s2, dsm_s2)
+        s3 = self.fuse_s3(rgb_s3, dsm_s3)
+        s4 = self.fuse_s4(rgb_s4, dsm_s4)
 
-        return low, mid, high
+        return s1, s2, s3, s4
 
 class UNetFormer_TwoModal(nn.Module):
     """
-    最终网络：
-    保留残差版 ManBaBlock，
-    只增加：
-    1) 中间尺度
-    2) skip 门控融合
+    四尺度 ConvNeXt + Pyramid-Mamba 网络：
+    1) RGB/DSM 双分支 ConvNeXt 编码器
+    2) 四尺度 CBAM 融合
+    3) 最深层 ManBaBlock 全局建模
+    4) 三次 SpatialGatedSkipFusion 逐级解码
     """
     def __init__(self,
                  num_classes: int = 6,
                  decode_channels: int = 128,
                  backbone_name: str = 'convnext_base',
-                 last_feat_size: int = 16,
+                 last_feat_size: int = 8,
                  out_ch: int = 256):
         super().__init__()
 
         self.encoder = TwoBranchBackbone(
             backbone_name=backbone_name,
             pretrained=True,
-            out_indices=(0, 1, 3),   # 三尺度
+            out_indices=(0, 1, 2, 3),
             out_ch=out_ch
         )
 
         self.decoder = PMDecoder(
-            in_chs_low=out_ch,
-            in_chs_mid=out_ch,
-            in_chs_high=out_ch,
+            in_chs_s1=out_ch,
+            in_chs_s2=out_ch,
+            in_chs_s3=out_ch,
+            in_chs_s4=out_ch,
             decoder_channels=decode_channels,
             num_classes=num_classes,
             last_feat_size=last_feat_size
         )
 
     def forward(self, rgb: torch.Tensor, dsm: torch.Tensor, mode=None):
-        low, mid, high = self.encoder(rgb, dsm)
-        out = self.decoder(low, mid, high)
+        s1, s2, s3, s4 = self.encoder(rgb, dsm)
+        out = self.decoder(s1, s2, s3, s4)
         return F.interpolate(out, size=rgb.shape[-2:], mode='bilinear', align_corners=False)

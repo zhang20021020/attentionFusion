@@ -225,7 +225,7 @@ elif MODE == 'Test':
             io.imsave('./resultsv/inference_UNetFormer_{}_tile_{}.png'.format('huge', id_), img)
 
     elif DATASET == 'Potsdam':
-        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch36_0.8640.pth'), strict=False)
+        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch43_0.8556.pth'), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)
