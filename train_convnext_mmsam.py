@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from glob import glob
 # from tqdm import tqdm_notebook as tqdm  # 已移除进度条
@@ -17,8 +18,8 @@ import torch.nn.init
 from utils import *
 from torch.autograd import Variable
 from IPython.display import clear_output
-# from UNetFormer_MMSAM import UNetFormer as MFNet
-from DoubleSwinMambnClean import UNetFormer_TwoModal as MFNet
+# 使用 ConvNeXt 替代 SAM 特征提取器，保留 UNetFormer_MMSAM 的融合和 Decoder
+from UNetFormer_ConvNeXt_MMSAM import UNetFormer as MFNet
 try:
     from urllib.request import URLopener
 except ImportError:
@@ -49,7 +50,16 @@ print("torch sees {} GPUs".format(torch.cuda.device_count()))
 print("Current device:", torch.cuda.current_device())
 print("Device name:", torch.cuda.get_device_name(torch.cuda.current_device()))
 
-net = MFNet(num_classes=N_CLASSES).cuda()
+# 如果你有 ConvNeXt 本地预训练权重，把路径改成真实存在的文件；没有就保持 None，代码会从头训练。
+CONVNEXT_WEIGHT = '/home/zhangben/mamba/attentionFusion/weights/convnext/convnext_base.pth'
+
+net = MFNet(
+    num_classes=N_CLASSES,
+    backbone_name='convnext_base',
+    pretrained=CONVNEXT_WEIGHT is not None,
+    weight_path=CONVNEXT_WEIGHT,
+    freeze_backbone=False
+).cuda()
 
 params = 0
 for name, param in net.named_parameters():
@@ -58,10 +68,7 @@ for name, param in net.named_parameters():
 params_rgb = sum(p.numel() for p in net.encoder.rgb_backbone.parameters())
 params_dsm = sum(p.numel() for p in net.encoder.dsm_backbone.parameters())
 params_encoder = params_rgb + params_dsm
-params_non_backbone = (
-    sum(p.numel() for p in net.parameters())
-    - params_encoder
-)
+params_non_backbone = sum(p.numel() for p in net.parameters()) - params_encoder
 
 print(f"All Params        : {params:,}")
 print(f"RGB Backbone      : {params_rgb:,}")
@@ -88,15 +95,16 @@ train_loader = torch.utils.data.DataLoader(train_set, batch_size=BATCH_SIZE)
 base_lr = 6e-4
 weight_decay = 5e-4
 # base_lr    = 0.01
-params_dict = dict(net.named_parameters())
-params_list = []
-for key, value in params_dict.items():
-    if '_D' in key:
-        params_list += [{'params': [value], 'lr': base_lr}]
-    else:
-        params_list += [{'params': [value], 'lr': base_lr / 2}]
+# ConvNeXt backbone 用较小学习率，新增的 FPN/Fusion/Decoder 用正常学习率。
+backbone_params = list(net.encoder.rgb_backbone.parameters()) + list(net.encoder.dsm_backbone.parameters())
+backbone_ids = set(id(p) for p in backbone_params)
+other_params = [p for p in net.parameters() if id(p) not in backbone_ids and p.requires_grad]
+backbone_params = [p for p in backbone_params if p.requires_grad]
 
-optimizer = optim.SGD(net.parameters(), lr=base_lr, momentum=0.9, weight_decay=weight_decay)
+optimizer = optim.SGD([
+    {'params': backbone_params, 'lr': base_lr / 10},
+    {'params': other_params, 'lr': base_lr},
+], momentum=0.9, weight_decay=weight_decay)
 scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [25, 35, 45], gamma=0.1)
 
 
@@ -166,7 +174,7 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
     weights = weights.cuda()
 
     iter_     = 0
-    MIoU_best = 0.82
+    MIoU_best = 0.8
     for e in range(1, epochs + 1):
         if scheduler is not None:
             scheduler.step()
@@ -225,7 +233,7 @@ elif MODE == 'Test':
             io.imsave('./resultsv/inference_UNetFormer_{}_tile_{}.png'.format('huge', id_), img)
 
     elif DATASET == 'Potsdam':
-        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch44_0.8563.pth'), strict=False)
+        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch44_0.8385.pth'), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)
