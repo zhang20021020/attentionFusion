@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="mfNet" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="mfNet" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="mamba" project-jdk-type="Python SDK" />
 </project>

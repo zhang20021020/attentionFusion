@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from glob import glob
 # from tqdm import tqdm_notebook as tqdm  # 已移除进度条
@@ -17,6 +18,7 @@ from utils import *
 from torch.autograd import Variable
 from IPython.display import clear_output
 from UNetFormer_MMSAM import UNetFormer as MFNet
+from train_logs import export_train_metrics
 
 
 import random
@@ -61,6 +63,18 @@ print("Current device:", torch.cuda.current_device())
 print("Device name:", torch.cuda.get_device_name(torch.cuda.current_device()))
 
 net = MFNet(num_classes=N_CLASSES).cuda()
+
+metrics_csv = os.path.join("logs", "{}_{}_train_metrics.csv".format(MODEL, DATASET))
+metrics_row = export_train_metrics(
+    net,
+    metrics_csv,
+    model_name=MODEL,
+    dataset_name=DATASET,
+    image_size=WINDOW_SIZE,
+    batch_size=1,
+)
+print("Train metrics exported to:", metrics_csv)
+print(metrics_row)
 
 
 
