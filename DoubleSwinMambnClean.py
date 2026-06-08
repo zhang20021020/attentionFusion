@@ -1019,7 +1019,7 @@ class TwoBranchBackbone(nn.Module):
         self.to256_dsm_high = nn.Conv2d(dsm_c3, out_ch, 1, bias=False) if dsm_c3 != out_ch else nn.Identity()
 
         # 继续保留你原来的融合策略，不再额外改编码端
-        self.fuse = CBAMFusion(out_ch)
+        self.fuse = SEFusion(out_ch)
 
     def _adapt_img_size(self, backbone: nn.Module, x: torch.Tensor):
         m = getattr(backbone, 'model', backbone)
