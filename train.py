@@ -19,6 +19,7 @@ from torch.autograd import Variable
 from IPython.display import clear_output
 # from UNetFormer_MMSAM import UNetFormer as MFNet
 from DoubleSwinMambnClean import UNetFormer_TwoModal as MFNet
+from train_logs import export_train_metrics, print_metrics
 try:
     from urllib.request import URLopener
 except ImportError:
@@ -68,6 +69,26 @@ print(f"RGB Backbone      : {params_rgb:,}")
 print(f"DSM Backbone      : {params_dsm:,}")
 print(f"Encoder (Total)   : {params_encoder:,}")
 print(f"Decoder + Others  : {params_non_backbone:,}")
+
+if MODE == "Train":
+    metrics_csv = os.environ.get(
+        "TRAIN_METRICS_CSV",
+        "./logs/mamba_opt002_model_metrics.csv"
+    )
+    try:
+        metrics_row = export_train_metrics(
+            model=net,
+            csv_path=metrics_csv,
+            model_name="mamba_opt002",
+            dataset_name=DATASET,
+            image_size=WINDOW_SIZE,
+            batch_size=int(os.environ.get("TRAIN_METRICS_BATCH_SIZE", "1")),
+            warmup=int(os.environ.get("TRAIN_METRICS_WARMUP", "10")),
+            repeat=int(os.environ.get("TRAIN_METRICS_REPEAT", "30")),
+        )
+        print_metrics(metrics_row)
+    except Exception as exc:
+        print("[!] Model metrics export failed; training will continue: {}".format(exc))
 
 # params1 = 0
 # params2 = 0
@@ -225,7 +246,7 @@ elif MODE == 'Test':
             io.imsave('./resultsv/inference_UNetFormer_{}_tile_{}.png'.format('huge', id_), img)
 
     elif DATASET == 'Potsdam':
-        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch36_0.8640.pth'), strict=False)
+        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch36_0.8526.pth'), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)
