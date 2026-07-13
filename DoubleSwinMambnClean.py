@@ -870,6 +870,85 @@ class SpatialGatedSkipFusion(nn.Module):
         out = self.out(out)
         return out
 
+class PathAggregationNetwork(nn.Module):
+    """
+    Bidirectional path aggregation for low, mid and high feature maps.
+
+    The top-down path propagates deep semantics to shallow features. The
+    bottom-up path then sends localization details back to deep features.
+    """
+    def __init__(self, channels=256):
+        super().__init__()
+
+        self.lateral_low = nn.Conv2d(channels, channels, kernel_size=1, bias=False)
+        self.lateral_mid = nn.Conv2d(channels, channels, kernel_size=1, bias=False)
+        self.lateral_high = nn.Conv2d(channels, channels, kernel_size=1, bias=False)
+
+        self.top_down_mid = self._refine_block(channels)
+        self.top_down_low = self._refine_block(channels)
+
+        self.down_low = self._downsample_block(channels)
+        self.down_mid = self._downsample_block(channels)
+        self.bottom_up_mid = self._refine_block(channels)
+        self.bottom_up_high = self._refine_block(channels)
+
+        self.apply(self._init_weights)
+
+    @staticmethod
+    def _refine_block(channels):
+        return nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU()
+        )
+
+    @staticmethod
+    def _downsample_block(channels):
+        return nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU()
+        )
+
+    @staticmethod
+    def _resize_like(source, target):
+        if source.shape[-2:] != target.shape[-2:]:
+            source = F.interpolate(
+                source,
+                size=target.shape[-2:],
+                mode='bilinear',
+                align_corners=False
+            )
+        return source
+
+    def forward(self, low, mid, high):
+        c_low = self.lateral_low(low)
+        c_mid = self.lateral_mid(mid)
+        c_high = self.lateral_high(high)
+
+        # Top-down path: high -> mid -> low.
+        p_high = c_high
+        p_mid = self.top_down_mid(c_mid + self._resize_like(p_high, c_mid))
+        p_low = self.top_down_low(c_low + self._resize_like(p_mid, c_low))
+
+        # Bottom-up path: low -> mid -> high.
+        n_mid = self.bottom_up_mid(
+            p_mid + self._resize_like(self.down_low(p_low), p_mid)
+        )
+        n_high = self.bottom_up_high(
+            p_high + self._resize_like(self.down_mid(n_mid), p_high)
+        )
+
+        return p_low, n_mid, n_high
+
+    @staticmethod
+    def _init_weights(module):
+        if isinstance(module, nn.Conv2d):
+            trunc_normal_(module.weight, std=0.02)
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+
+
 class PMDecoder(nn.Module):
     """
     只保留两项有效改动：
@@ -1094,6 +1173,8 @@ class UNetFormer_TwoModal(nn.Module):
             out_ch=out_ch
         )
 
+        self.path_aggregation = PathAggregationNetwork(channels=out_ch)
+
         self.decoder = PMDecoder(
             in_chs_low=out_ch,
             in_chs_mid=out_ch,
@@ -1105,5 +1186,6 @@ class UNetFormer_TwoModal(nn.Module):
 
     def forward(self, rgb: torch.Tensor, dsm: torch.Tensor, mode=None):
         low, mid, high = self.encoder(rgb, dsm)
+        low, mid, high = self.path_aggregation(low, mid, high)
         out = self.decoder(low, mid, high)
         return F.interpolate(out, size=rgb.shape[-2:], mode='bilinear', align_corners=False)
