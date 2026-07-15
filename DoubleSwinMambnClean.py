@@ -1163,14 +1163,17 @@ class UNetFormer_TwoModal(nn.Module):
                  decode_channels: int = 128,
                  backbone_name: str = 'convnext_base',
                  last_feat_size: int = 16,
-                 out_ch: int = 256):
+                 out_ch: int = 256,
+                 pretrained: bool = True,
+                 weight_path: str = '/home/zhangben/mamba/attentionFusion/weights/convnext/convnext_base.pth'):
         super().__init__()
 
         self.encoder = TwoBranchBackbone(
             backbone_name=backbone_name,
-            pretrained=True,
+            pretrained=pretrained,
             out_indices=(0, 1, 3),   # 三尺度
-            out_ch=out_ch
+            out_ch=out_ch,
+            weight_path=weight_path
         )
 
         self.path_aggregation = PathAggregationNetwork(channels=out_ch)

@@ -19,7 +19,6 @@ from torch.autograd import Variable
 from IPython.display import clear_output
 # from UNetFormer_MMSAM import UNetFormer as MFNet
 from DoubleSwinMambnClean import UNetFormer_TwoModal as MFNet
-from train_logs import export_train_metrics, print_metrics
 try:
     from urllib.request import URLopener
 except ImportError:
@@ -70,26 +69,6 @@ print(f"DSM Backbone      : {params_dsm:,}")
 print(f"Encoder (Total)   : {params_encoder:,}")
 print(f"Decoder + Others  : {params_non_backbone:,}")
 
-if MODE == "Train":
-    metrics_csv = os.environ.get(
-        "TRAIN_METRICS_CSV",
-        "./logs/mamba_opt002_model_metrics.csv"
-    )
-    try:
-        metrics_row = export_train_metrics(
-            model=net,
-            csv_path=metrics_csv,
-            model_name="mamba_opt002",
-            dataset_name=DATASET,
-            image_size=WINDOW_SIZE,
-            batch_size=int(os.environ.get("TRAIN_METRICS_BATCH_SIZE", "1")),
-            warmup=int(os.environ.get("TRAIN_METRICS_WARMUP", "10")),
-            repeat=int(os.environ.get("TRAIN_METRICS_REPEAT", "30")),
-        )
-        print_metrics(metrics_row)
-    except Exception as exc:
-        print("[!] Model metrics export failed; training will continue: {}".format(exc))
-
 # params1 = 0
 # params2 = 0
 # for name, param in net.encoder.rgb_backbone.named_parameters():
@@ -122,7 +101,7 @@ scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [25, 35, 45], gamma=0.1)
 
 
 def test(net, test_ids, all=False, stride=WINDOW_SIZE[0], batch_size=BATCH_SIZE, window_size=WINDOW_SIZE):
-    if DATASET == 'Potsdam':
+    if DATASET in ('Potsdam', 'Potsdam2'):
         test_images = (
             1 / 255 * np.asarray(io.imread(DATA_FOLDER.format(id))[:, :, :3], dtype='float32')
             for id in test_ids
@@ -226,8 +205,10 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
             if MIoU > MIoU_best:
                 if DATASET == 'Vaihingen':
                     torch.save(net.state_dict(), './resultsv/{}_epoch{}_{}'.format(MODEL, e, MIoU))
-                elif DATASET == 'Potsdam':
-                    torch.save(net.state_dict(), './resultsp/{}_epoch{}_{}'.format(MODEL, e, MIoU))
+                elif DATASET in ('Potsdam', 'Potsdam2'):
+                    result_dir = './resultsp2' if DATASET == 'Potsdam2' else './resultsp'
+                    os.makedirs(result_dir, exist_ok=True)
+                    torch.save(net.state_dict(), '{}/{}_epoch{}_{}'.format(result_dir, MODEL, e, MIoU))
                 MIoU_best = MIoU
     print('MIoU_best: ', MIoU_best)
 
@@ -237,7 +218,7 @@ if MODE == 'Train':
 
 elif MODE == 'Test':
     if DATASET == 'Vaihingen':
-        net.load_state_dict(torch.load('./resultsv/UNetformer_epoch31_0.8423784622411172'), strict=False)
+        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch26_0.8528.pth'), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)
@@ -245,11 +226,12 @@ elif MODE == 'Test':
             img = convert_to_color(p)
             io.imsave('./resultsv/inference_UNetFormer_{}_tile_{}.png'.format('huge', id_), img)
 
-    elif DATASET == 'Potsdam':
-        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch36_0.8526.pth'), strict=False)
+    elif DATASET in ('Potsdam', 'Potsdam2'):
+        result_dir = './resultsp2' if DATASET == 'Potsdam2' else './resultsp'
+        net.load_state_dict(torch.load('{}/UNetformer_epoch36_0.8640.pth'.format(result_dir)), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)
         for p, id_ in zip(all_preds, test_ids):
             img = convert_to_color(p)
-            io.imsave('./resultsp/inference_UNetFormer_{}_tile_{}.png'.format('base', id_), img)
+            io.imsave('{}/inference_UNetFormer_{}_tile_{}.png'.format(result_dir, 'base', id_), img)

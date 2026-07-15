@@ -42,7 +42,8 @@ MODEL = 'UNetformer'
 MODE = 'Train'
 # MODE = 'Test'
 # DATASET = 'Vaihingen'
-DATASET = 'Potsdam'
+# DATASET = 'Potsdam'
+DATASET = 'Potsdam2'
 IF_SAM = True
 # IF_SAM = False
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -60,18 +61,20 @@ if DATASET == 'Vaihingen':
     DSM_FOLDER = MAIN_FOLDER + 'dsm/dsm_09cm_matching_area{}.tif'
     LABEL_FOLDER = MAIN_FOLDER + 'gts_for_participants/top_mosaic_09cm_area{}.tif'
     ERODED_FOLDER = MAIN_FOLDER + 'gts_eroded_for_participants/top_mosaic_09cm_area{}_noBoundary.tif'
-elif DATASET == 'Potsdam':
+elif DATASET in ('Potsdam', 'Potsdam2'):
     train_ids = ['6_10', '7_10', '2_12', '3_11', '2_10', '7_8', '5_10', '3_12', '5_12', '7_11', '7_9', '6_9', '7_7',
                  '4_12', '6_8', '6_12', '6_7', '4_11']
     test_ids = ['4_10', '5_11', '2_11', '3_10', '6_11', '7_12']
     Stride_Size = 128
     epochs = 50
     save_epoch = 1
-    MAIN_FOLDER = FOLDER + 'Potsdam/'
+    MAIN_FOLDER = FOLDER + DATASET + '/'
     DATA_FOLDER = MAIN_FOLDER + '4_Ortho_RGBIR/top_potsdam_{}_RGBIR.tif'
     DSM_FOLDER = MAIN_FOLDER + '1_DSM_normalisation/dsm_potsdam_{}_normalized_lastools.jpg'
     LABEL_FOLDER = MAIN_FOLDER + '5_Labels_for_participants/top_potsdam_{}_label.tif'
     ERODED_FOLDER = MAIN_FOLDER + '5_Labels_for_participants_no_Boundary/top_potsdam_{}_label_noBoundary.tif'
+else:
+    raise ValueError("Unsupported DATASET '{}'. Use 'Vaihingen', 'Potsdam', or 'Potsdam2'.".format(DATASET))
 
 print(MODEL + ', ' + MODE + ', ' + DATASET + ', IF_SAM: ' + str(IF_SAM) + ', WINDOW_SIZE: ', WINDOW_SIZE,
       ', BATCH_SIZE: ' + str(BATCH_SIZE), ', Stride_Size: ', str(Stride_Size),
@@ -131,7 +134,7 @@ class ISPRS_dataset(torch.utils.data.Dataset):
         self.label_cache_ = {}
 
     def __len__(self):
-        if DATASET == 'Potsdam':
+        if DATASET in ('Potsdam', 'Potsdam2'):
             return 10 * 1000
         elif DATASET == 'Vaihingen':
             return 10 * 1000
@@ -172,7 +175,7 @@ class ISPRS_dataset(torch.utils.data.Dataset):
         else:
             # Data is normalized in [0, 1]
             ## Potsdam IRRG
-            if DATASET == 'Potsdam':
+            if DATASET in ('Potsdam', 'Potsdam2'):
                 ## RGB
                 data = io.imread(self.data_files[random_idx])[:, :, :3].transpose((2, 0, 1))
                 ## IRRG
