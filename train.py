@@ -218,7 +218,7 @@ if MODE == 'Train':
 
 elif MODE == 'Test':
     if DATASET == 'Vaihingen':
-        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch26_0.8528.pth'), strict=False)
+        net.load_state_dict(torch.load('./resultsp2/UNetformer_epoch47_0.8442.pth'), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)

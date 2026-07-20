@@ -1,8 +1,9 @@
 import argparse
-import os
 from pathlib import Path
 
 import cv2
+import numpy as np
+import tifffile
 
 
 SCALE_5CM_TO_9CM = 5.0 / 9.0
@@ -12,18 +13,22 @@ FOLDERS = {
     "4_Ortho_RGBIR": {
         "patterns": ("*.tif", "*.tiff", "*.png", "*.jpg", "*.jpeg"),
         "interpolation": cv2.INTER_AREA,
+        "min_channels": 4,
     },
     "1_DSM_normalisation": {
         "patterns": ("*.tif", "*.tiff", "*.png", "*.jpg", "*.jpeg"),
         "interpolation": cv2.INTER_AREA,
+        "min_channels": None,
     },
     "5_Labels_for_participants": {
         "patterns": ("*.tif", "*.tiff", "*.png", "*.jpg", "*.jpeg"),
         "interpolation": cv2.INTER_NEAREST,
+        "min_channels": 3,
     },
     "5_Labels_for_participants_no_Boundary": {
         "patterns": ("*.tif", "*.tiff", "*.png", "*.jpg", "*.jpeg"),
         "interpolation": cv2.INTER_NEAREST,
+        "min_channels": 3,
     },
 }
 
@@ -35,13 +40,69 @@ def collect_files(folder, patterns):
     return sorted(files)
 
 
-def resize_image(src_path, dst_path, scale, interpolation, overwrite=False):
+def is_tiff(path):
+    return path.suffix.lower() in (".tif", ".tiff")
+
+
+def read_image(path):
+    if is_tiff(path):
+        image = tifffile.imread(path)
+
+        # Some multi-band TIFF files use planar (C, H, W) storage.  Normalize
+        # them to the channel-last layout expected by the training pipeline.
+        if (
+            image.ndim == 3
+            and image.shape[0] in (3, 4)
+            and image.shape[-1] not in (3, 4)
+        ):
+            image = np.moveaxis(image, 0, -1)
+        return image
+
+    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise RuntimeError(f"Failed to read image: {path}")
+    return image
+
+
+def write_image(path, image):
+    if is_tiff(path):
+        photometric = (
+            "rgb"
+            if image.ndim == 3 and image.shape[-1] in (3, 4)
+            else "minisblack"
+        )
+        tifffile.imwrite(
+            path,
+            image,
+            compression=None,
+            photometric=photometric,
+            metadata=None,
+        )
+        return
+
+    if not cv2.imwrite(str(path), image):
+        raise RuntimeError(f"Failed to write image: {path}")
+
+
+def resize_image(
+    src_path,
+    dst_path,
+    scale,
+    interpolation,
+    min_channels=None,
+    overwrite=False,
+):
     if dst_path.exists() and not overwrite:
         return "skip"
 
-    image = cv2.imread(str(src_path), cv2.IMREAD_UNCHANGED)
-    if image is None:
-        raise RuntimeError(f"Failed to read image: {src_path}")
+    image = read_image(src_path)
+    if min_channels is not None and (
+        image.ndim != 3 or image.shape[-1] < min_channels
+    ):
+        raise RuntimeError(
+            f"Expected at least {min_channels} channels in {src_path}, "
+            f"but got shape {image.shape}."
+        )
 
     height, width = image.shape[:2]
     new_width = max(1, int(round(width * scale)))
@@ -54,18 +115,21 @@ def resize_image(src_path, dst_path, scale, interpolation, overwrite=False):
     )
 
     dst_path.parent.mkdir(parents=True, exist_ok=True)
-    ok = cv2.imwrite(str(dst_path), resized)
-    if not ok:
-        raise RuntimeError(f"Failed to write image: {dst_path}")
+    write_image(dst_path, resized)
     return "write"
 
 
 def downsample_potsdam(src_root, dst_root, scale, overwrite=False, dry_run=False):
-    src_root = Path(src_root)
-    dst_root = Path(dst_root)
+    src_root = Path(src_root).expanduser().resolve()
+    dst_root = Path(dst_root).expanduser().resolve()
 
     if not src_root.is_dir():
         raise FileNotFoundError(f"Source directory does not exist: {src_root}")
+    if src_root == dst_root:
+        raise ValueError(
+            "Source and target directories must be different; refusing to "
+            "overwrite the original 5cm Potsdam dataset."
+        )
 
     total_written = 0
     total_skipped = 0
@@ -73,6 +137,8 @@ def downsample_potsdam(src_root, dst_root, scale, overwrite=False, dry_run=False
     print(f"Source: {src_root}")
     print(f"Target: {dst_root}")
     print(f"Scale : {scale:.6f}")
+    print(f"Overwrite existing target files: {overwrite}")
+    print("TIFF compression: NONE")
 
     for folder_name, cfg in FOLDERS.items():
         src_folder = src_root / folder_name
@@ -98,6 +164,7 @@ def downsample_potsdam(src_root, dst_root, scale, overwrite=False, dry_run=False
                 dst_path,
                 scale=scale,
                 interpolation=cfg["interpolation"],
+                min_channels=cfg["min_channels"],
                 overwrite=overwrite,
             )
             if status == "write":
@@ -136,8 +203,16 @@ def parse_args():
     )
     parser.add_argument(
         "--overwrite",
+        dest="overwrite",
         action="store_true",
+        default=True,
         help="Overwrite existing files in the target directory.",
+    )
+    parser.add_argument(
+        "--no-overwrite",
+        dest="overwrite",
+        action="store_false",
+        help="Keep existing files in the target directory instead of replacing them.",
     )
     parser.add_argument(
         "--dry-run",
