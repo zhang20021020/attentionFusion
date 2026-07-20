@@ -22,7 +22,7 @@ def label_path(data_root, domain, tile_id, use_eroded=True):
             "gts_for_participants",
             f"top_mosaic_09cm_area{tile_id}.tif",
         )
-    elif domain == "Potsdam":
+    elif domain in ("Potsdam", "Potsdam2"):
         eroded = os.path.join(
             root,
             "5_Labels_for_participants_no_Boundary",
@@ -132,6 +132,8 @@ def compute_metrics(cm):
 
 
 def load_weights(model, checkpoint_path, weight_key, device):
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"DACS checkpoint does not exist: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device)
     if isinstance(checkpoint, dict) and weight_key in checkpoint:
         state_dict = checkpoint[weight_key]
@@ -140,12 +142,20 @@ def load_weights(model, checkpoint_path, weight_key, device):
     else:
         state_dict = checkpoint
 
+    if not isinstance(state_dict, dict):
+        raise TypeError(f"Unsupported checkpoint format in: {checkpoint_path}")
+
     if any(key.startswith("module.") for key in state_dict):
         state_dict = {key.replace("module.", "", 1): value for key, value in state_dict.items()}
 
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     print(f"Loaded {weight_key} weights from: {checkpoint_path}")
     print(f"Missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
+    if missing or unexpected:
+        raise RuntimeError(
+            "The evaluation checkpoint does not exactly match the current model; "
+            "refusing to report potentially invalid Experiment C metrics."
+        )
 
 
 def evaluate(args):
@@ -194,7 +204,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate a DACS multimodal checkpoint.")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--data-root", default="/home/zhangben/ISPRS_dataset/")
-    parser.add_argument("--domain", choices=["Potsdam", "Vaihingen"], default="Vaihingen")
+    parser.add_argument("--domain", choices=sorted(DOMAIN_IDS), default="Vaihingen")
     parser.add_argument("--split", choices=["train", "test"], default="test")
     parser.add_argument("--ids", default="", help="Comma-separated tile ids. Overrides --split.")
     parser.add_argument("--weight-key", choices=["model", "teacher"], default="teacher")

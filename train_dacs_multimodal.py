@@ -17,6 +17,7 @@ from DoubleSwinMambnClean import UNetFormer_TwoModal as MFNet
 LABELS = ["roads", "buildings", "low veg.", "trees", "cars", "clutter"]
 N_CLASSES = len(LABELS)
 IGNORE_INDEX = 255
+DEFAULT_SOURCE_CHECKPOINT = "./resultsp2/UNetformer_epoch47_0.8442.pth"
 
 PALETTE = {
     0: (255, 255, 255),
@@ -30,19 +31,24 @@ PALETTE = {
 INVERT_PALETTE = {v: k for k, v in PALETTE.items()}
 
 
+POTSDAM_IDS = {
+    "train": [
+        "6_10", "7_10", "2_12", "3_11", "2_10", "7_8", "5_10", "3_12",
+        "5_12", "7_11", "7_9", "6_9", "7_7", "4_12", "6_8", "6_12",
+        "6_7", "4_11",
+    ],
+    "test": ["4_10", "5_11", "2_11", "3_10", "6_11", "7_12"],
+}
+
+
 DOMAIN_IDS = {
     "Vaihingen": {
         "train": ["1", "3", "23", "26", "7", "11", "13", "28", "17", "32", "34", "37"],
         "test": ["5", "21", "15", "30"],
     },
-    "Potsdam": {
-        "train": [
-            "6_10", "7_10", "2_12", "3_11", "2_10", "7_8", "5_10", "3_12",
-            "5_12", "7_11", "7_9", "6_9", "7_7", "4_12", "6_8", "6_12",
-            "6_7", "4_11",
-        ],
-        "test": ["4_10", "5_11", "2_11", "3_10", "6_11", "7_12"],
-    },
+    "Potsdam": POTSDAM_IDS,
+    # Potsdam2 contains the same tiles downsampled from 5 cm to 9 cm GSD.
+    "Potsdam2": POTSDAM_IDS,
 }
 
 
@@ -71,7 +77,7 @@ def domain_paths(data_root, domain):
             "dsm": os.path.join(root, "dsm", "dsm_09cm_matching_area{}.tif"),
             "label": os.path.join(root, "gts_for_participants", "top_mosaic_09cm_area{}.tif"),
         }
-    if domain == "Potsdam":
+    if domain in ("Potsdam", "Potsdam2"):
         return {
             "rgb": os.path.join(root, "4_Ortho_RGBIR", "top_potsdam_{}_RGBIR.tif"),
             "dsm": os.path.join(root, "1_DSM_normalisation", "dsm_potsdam_{}_normalized_lastools.jpg"),
@@ -220,20 +226,51 @@ def update_ema(student, teacher, alpha):
             teacher_buffer.data.copy_(student_buffer.data)
 
 
-def load_checkpoint(model, path, device):
+def load_checkpoint(model, path, device, allow_partial=False):
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"Source checkpoint does not exist: {path}. "
+            "Experiment C must start from the source-only Experiment B weights."
+        )
     checkpoint = torch.load(path, map_location=device)
-    state_dict = checkpoint.get("state_dict", checkpoint)
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    elif isinstance(checkpoint, dict) and "model" in checkpoint:
+        state_dict = checkpoint["model"]
+    else:
+        state_dict = checkpoint
+    if not isinstance(state_dict, dict):
+        raise TypeError(f"Unsupported checkpoint format in: {path}")
     if any(key.startswith("module.") for key in state_dict):
         state_dict = {key.replace("module.", "", 1): value for key, value in state_dict.items()}
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     print(f"Loaded checkpoint: {path}")
     print(f"Missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
+    if (missing or unexpected) and not allow_partial:
+        raise RuntimeError(
+            "The Experiment B checkpoint does not exactly match the DACS model. "
+            "Use --allow-partial-checkpoint only when this mismatch is intentional."
+        )
 
 
 def train(args):
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     crop_size = (args.crop_size, args.crop_size)
+    amp_enabled = args.amp and device.type == "cuda"
+
+    if args.source == args.target:
+        raise ValueError("DACS requires different source and target domains.")
+    if not args.source_checkpoint:
+        raise ValueError(
+            "--source-checkpoint is required for Experiment C; pass the Experiment B weights."
+        )
+
+    print("Experiment C: source-only 9 cm model -> DACS UDA -> Vaihingen")
+    print(f"Source domain      : {args.source}")
+    print(f"Target domain      : {args.target} (labels are not loaded)")
+    print(f"Source checkpoint  : {args.source_checkpoint}")
+    print(f"AMP enabled        : {amp_enabled}")
 
     source_dataset = DomainPatchDataset(
         args.source,
@@ -276,7 +313,12 @@ def train(args):
         weight_path=args.weight_path or None,
     ).to(device)
     if args.source_checkpoint:
-        load_checkpoint(model, args.source_checkpoint, device)
+        load_checkpoint(
+            model,
+            args.source_checkpoint,
+            device,
+            allow_partial=args.allow_partial_checkpoint,
+        )
 
     teacher = copy.deepcopy(model).to(device)
     teacher.eval()
@@ -284,6 +326,7 @@ def train(args):
         param.requires_grad_(False)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
     source_iter = cycle(source_loader)
     target_iter = cycle(target_loader)
 
@@ -299,10 +342,22 @@ def train(args):
         dsm_t = target["dsm"].to(device, non_blocking=True)
 
         model.train()
-        logits_s = model(rgb_s, dsm_s, mode="Train")
-        loss_source = weighted_cross_entropy(logits_s, label_s)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
+            logits_s = model(rgb_s, dsm_s, mode="Train")
+            loss_source = weighted_cross_entropy(logits_s, label_s)
 
-        with torch.no_grad():
+        # Backpropagate the source loss first so its activation graph can be
+        # released before the mixed forward pass. This keeps DACS practical on
+        # a 24 GiB GPU without changing the accumulated gradient.
+        scaler.scale(loss_source).backward()
+        del logits_s
+
+        with torch.no_grad(), torch.autocast(
+            device_type=device.type,
+            dtype=torch.float16,
+            enabled=amp_enabled,
+        ):
             teacher.eval()
             logits_t = teacher(rgb_t, dsm_t, mode="Test")
             probs_t = torch.softmax(logits_t, dim=1)
@@ -319,21 +374,22 @@ def train(args):
         mixed_label = torch.where(mask.squeeze(1).bool(), label_s, pseudo_label)
         mixed_weight = mask.squeeze(1) + (1.0 - mask.squeeze(1)) * pseudo_weight
 
-        logits_mix = model(mixed_rgb, mixed_dsm, mode="Train")
-        loss_mix = weighted_cross_entropy(logits_mix, mixed_label, mixed_weight)
-        loss = loss_source + args.mix_loss_weight * loss_mix
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
+            logits_mix = model(mixed_rgb, mixed_dsm, mode="Train")
+            loss_mix = weighted_cross_entropy(logits_mix, mixed_label, mixed_weight)
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
+        scaler.scale(args.mix_loss_weight * loss_mix).backward()
+        scaler.step(optimizer)
+        scaler.update()
         update_ema(model, teacher, args.ema_alpha)
 
         if iteration % args.log_interval == 0 or iteration == 1:
             elapsed = time.time() - start
             trusted = pseudo_weight.mean().item()
+            loss_value = loss_source.item() + args.mix_loss_weight * loss_mix.item()
             print(
                 f"iter {iteration:05d}/{args.iters} "
-                f"loss={loss.item():.4f} src={loss_source.item():.4f} "
+                f"loss={loss_value:.4f} src={loss_source.item():.4f} "
                 f"mix={loss_mix.item():.4f} pseudo_w={trusted:.3f} "
                 f"time={elapsed:.1f}s"
             )
@@ -354,12 +410,17 @@ def train(args):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="DACS-style UDA for RGB+DSM segmentation.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Experiment C: initialize from the Potsdam2 9 cm source-only model, "
+            "then run DACS RGB+DSM adaptation to Vaihingen."
+        )
+    )
     parser.add_argument("--data-root", default="/home/zhangben/ISPRS_dataset/")
-    parser.add_argument("--source", choices=["Potsdam", "Vaihingen"], default="Potsdam")
-    parser.add_argument("--target", choices=["Potsdam", "Vaihingen"], default="Vaihingen")
+    parser.add_argument("--source", choices=sorted(DOMAIN_IDS), default="Potsdam2")
+    parser.add_argument("--target", choices=sorted(DOMAIN_IDS), default="Vaihingen")
     parser.add_argument("--crop-size", type=int, default=256)
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--source-length", type=int, default=10000)
     parser.add_argument("--target-length", type=int, default=10000)
@@ -370,10 +431,25 @@ def parse_args():
     parser.add_argument("--pseudo-threshold", type=float, default=0.7)
     parser.add_argument("--pseudo-kernel-size", type=int, default=7)
     parser.add_argument("--mix-loss-weight", type=float, default=1.0)
-    parser.add_argument("--source-checkpoint", default="")
+    parser.add_argument(
+        "--source-checkpoint",
+        default=DEFAULT_SOURCE_CHECKPOINT,
+        help="Experiment B source-only checkpoint used to initialize student and EMA teacher.",
+    )
+    parser.add_argument(
+        "--allow-partial-checkpoint",
+        action="store_true",
+        help="Allow missing/unexpected model keys when loading Experiment B weights.",
+    )
     parser.add_argument("--pretrained", action="store_true")
     parser.add_argument("--weight-path", default="")
-    parser.add_argument("--out-dir", default="./results_uda")
+    parser.add_argument("--out-dir", default="./results_experiment_c")
+    parser.add_argument(
+        "--amp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use CUDA automatic mixed precision (enabled by default).",
+    )
     parser.add_argument("--cache", action="store_true")
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
