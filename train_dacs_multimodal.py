@@ -198,14 +198,29 @@ def classmix_mask(labels, num_classes=N_CLASSES, ignore_index=IGNORE_INDEX):
 
 
 def local_pseudo_weight(pseudo_prob, threshold, kernel_size):
-    if kernel_size <= 0:
-        valid = pseudo_prob.ge(threshold).float()
-        ratio = valid.flatten(1).mean(dim=1).view(-1, 1, 1)
-        return ratio.expand_as(pseudo_prob)
+    """Return confidence weights while strictly masking uncertain pixels."""
+    valid = pseudo_prob.ge(threshold).float()
+    if kernel_size <= 1:
+        return valid
+
     kernel = torch.ones((1, 1, kernel_size, kernel_size), device=pseudo_prob.device)
-    valid = pseudo_prob.ge(threshold).float().unsqueeze(1)
-    weight = F.conv2d(valid, kernel, padding=kernel_size // 2)
-    return (weight / float(kernel_size * kernel_size)).squeeze(1)
+    local_density = F.conv2d(valid.unsqueeze(1), kernel, padding=kernel_size // 2)
+    local_density = (local_density / float(kernel_size * kernel_size)).squeeze(1)
+    return valid * local_density
+
+
+def class_distribution(labels, num_classes=N_CLASSES):
+    histogram = torch.bincount(labels.reshape(-1), minlength=num_classes)[:num_classes].float()
+    return histogram / histogram.sum().clamp_min(1.0)
+
+
+def current_mix_weight(iteration, warmup_iters, ramp_iters, max_weight):
+    if iteration <= warmup_iters:
+        return 0.0
+    if ramp_iters <= 0:
+        return max_weight
+    progress = min(1.0, (iteration - warmup_iters) / float(ramp_iters))
+    return max_weight * progress
 
 
 def weighted_cross_entropy(logits, target, pixel_weight=None):
@@ -224,6 +239,40 @@ def update_ema(student, teacher, alpha):
             teacher_param.data.mul_(alpha).add_(student_param.data, alpha=1.0 - alpha)
         for teacher_buffer, student_buffer in zip(teacher.buffers(), student.buffers()):
             teacher_buffer.data.copy_(student_buffer.data)
+
+
+def set_batchnorm_eval(module):
+    if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+        module.eval()
+
+
+def build_optimizer(model, backbone_lr, head_lr, weight_decay):
+    backbone_prefixes = ("encoder.rgb_backbone.", "encoder.dsm_backbone.")
+    backbone_params = []
+    head_params = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if name.startswith(backbone_prefixes):
+            backbone_params.append(parameter)
+        else:
+            head_params.append(parameter)
+
+    if not backbone_params or not head_params:
+        raise RuntimeError("Could not split model parameters into backbone and head groups.")
+
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": backbone_params, "lr": backbone_lr, "name": "backbone"},
+            {"params": head_params, "lr": head_lr, "name": "head"},
+        ],
+        weight_decay=weight_decay,
+    )
+    backbone_count = sum(parameter.numel() for parameter in backbone_params)
+    head_count = sum(parameter.numel() for parameter in head_params)
+    print(f"Backbone parameters: {backbone_count:,}, lr={backbone_lr:g}")
+    print(f"Head parameters    : {head_count:,}, lr={head_lr:g}")
+    return optimizer
 
 
 def load_checkpoint(model, path, device, allow_partial=False):
@@ -265,12 +314,32 @@ def train(args):
         raise ValueError(
             "--source-checkpoint is required for Experiment C; pass the Experiment B weights."
         )
+    if args.warmup_iters < 0:
+        raise ValueError("--warmup-iters must be non-negative.")
+    if args.iters <= args.warmup_iters:
+        raise ValueError("--iters must be greater than --warmup-iters so DACS is actually run.")
+    if args.mix_ramp_iters < 0:
+        raise ValueError("--mix-ramp-iters must be non-negative.")
+    if not 0.0 < args.ema_alpha < 1.0:
+        raise ValueError("--ema-alpha must be between 0 and 1.")
+    if not 0.0 <= args.pseudo_threshold <= 1.0:
+        raise ValueError("--pseudo-threshold must be between 0 and 1.")
+    if not 0.0 < args.collapse_warning_threshold <= 1.0:
+        raise ValueError("--collapse-warning-threshold must be in (0, 1].")
+    if args.lr <= 0 or args.backbone_lr <= 0:
+        raise ValueError("Learning rates must be positive.")
+    if args.pseudo_kernel_size > 1 and args.pseudo_kernel_size % 2 == 0:
+        raise ValueError("--pseudo-kernel-size must be odd (or <= 1 to disable local weighting).")
 
     print("Experiment C: source-only 9 cm model -> DACS UDA -> Vaihingen")
     print(f"Source domain      : {args.source}")
     print(f"Target domain      : {args.target} (labels are not loaded)")
     print(f"Source checkpoint  : {args.source_checkpoint}")
     print(f"AMP enabled        : {amp_enabled}")
+    print(f"Freeze BN stats    : {args.freeze_bn}")
+    print(f"Warm-up iterations : {args.warmup_iters}")
+    print(f"Mix ramp iterations: {args.mix_ramp_iters}")
+    print(f"Pseudo threshold   : {args.pseudo_threshold}")
 
     source_dataset = DomainPatchDataset(
         args.source,
@@ -325,7 +394,12 @@ def train(args):
     for param in teacher.parameters():
         param.requires_grad_(False)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = build_optimizer(
+        model,
+        backbone_lr=args.backbone_lr,
+        head_lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
     scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
     source_iter = cycle(source_loader)
     target_iter = cycle(target_loader)
@@ -334,14 +408,19 @@ def train(args):
     start = time.time()
     for iteration in range(1, args.iters + 1):
         source = next(source_iter)
-        target = next(target_iter)
         rgb_s = source["rgb"].to(device, non_blocking=True)
         dsm_s = source["dsm"].to(device, non_blocking=True)
         label_s = source["label"].to(device, non_blocking=True)
-        rgb_t = target["rgb"].to(device, non_blocking=True)
-        dsm_t = target["dsm"].to(device, non_blocking=True)
+        mix_weight = current_mix_weight(
+            iteration,
+            warmup_iters=args.warmup_iters,
+            ramp_iters=args.mix_ramp_iters,
+            max_weight=args.mix_loss_weight,
+        )
 
         model.train()
+        if args.freeze_bn:
+            model.apply(set_batchnorm_eval)
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
             logits_s = model(rgb_s, dsm_s, mode="Train")
@@ -353,54 +432,97 @@ def train(args):
         scaler.scale(loss_source).backward()
         del logits_s
 
-        with torch.no_grad(), torch.autocast(
-            device_type=device.type,
-            dtype=torch.float16,
-            enabled=amp_enabled,
-        ):
-            teacher.eval()
-            logits_t = teacher(rgb_t, dsm_t, mode="Test")
-            probs_t = torch.softmax(logits_t, dim=1)
-            pseudo_prob, pseudo_label = probs_t.max(dim=1)
-            pseudo_weight = local_pseudo_weight(
-                pseudo_prob,
-                threshold=args.pseudo_threshold,
-                kernel_size=args.pseudo_kernel_size,
-            )
+        loss_mix_value = 0.0
+        pseudo_weight_mean = 0.0
+        pseudo_valid_ratio = 0.0
+        pseudo_distribution = None
+        if mix_weight > 0.0:
+            target = next(target_iter)
+            rgb_t = target["rgb"].to(device, non_blocking=True)
+            dsm_t = target["dsm"].to(device, non_blocking=True)
 
-        mask = classmix_mask(label_s)
-        mixed_rgb = mask * rgb_s + (1.0 - mask) * rgb_t
-        mixed_dsm = mask.squeeze(1) * dsm_s + (1.0 - mask.squeeze(1)) * dsm_t
-        mixed_label = torch.where(mask.squeeze(1).bool(), label_s, pseudo_label)
-        mixed_weight = mask.squeeze(1) + (1.0 - mask.squeeze(1)) * pseudo_weight
+            with torch.no_grad(), torch.autocast(
+                device_type=device.type,
+                dtype=torch.float16,
+                enabled=amp_enabled,
+            ):
+                teacher.eval()
+                logits_t = teacher(rgb_t, dsm_t, mode="Test")
+                probs_t = torch.softmax(logits_t, dim=1)
+                pseudo_prob, pseudo_label = probs_t.max(dim=1)
+                pseudo_weight = local_pseudo_weight(
+                    pseudo_prob,
+                    threshold=args.pseudo_threshold,
+                    kernel_size=args.pseudo_kernel_size,
+                )
+                pseudo_distribution = class_distribution(pseudo_label).cpu()
 
-        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
-            logits_mix = model(mixed_rgb, mixed_dsm, mode="Train")
-            loss_mix = weighted_cross_entropy(logits_mix, mixed_label, mixed_weight)
+            mask = classmix_mask(label_s)
+            mixed_rgb = mask * rgb_s + (1.0 - mask) * rgb_t
+            mixed_dsm = mask.squeeze(1) * dsm_s + (1.0 - mask.squeeze(1)) * dsm_t
+            mixed_label = torch.where(mask.squeeze(1).bool(), label_s, pseudo_label)
+            mixed_weight = mask.squeeze(1) + (1.0 - mask.squeeze(1)) * pseudo_weight
 
-        scaler.scale(args.mix_loss_weight * loss_mix).backward()
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
+                logits_mix = model(mixed_rgb, mixed_dsm, mode="Train")
+                loss_mix = weighted_cross_entropy(logits_mix, mixed_label, mixed_weight)
+
+            scaler.scale(mix_weight * loss_mix).backward()
+            loss_mix_value = loss_mix.item()
+            pseudo_weight_mean = pseudo_weight.mean().item()
+            pseudo_valid_ratio = pseudo_weight.gt(0).float().mean().item()
+
+        grad_norm = None
+        if args.grad_clip > 0:
+            scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip).item()
+        scale_before_step = scaler.get_scale()
         scaler.step(optimizer)
         scaler.update()
-        update_ema(model, teacher, args.ema_alpha)
+        step_skipped = scaler.get_scale() < scale_before_step
+        ema_alpha = min(args.ema_alpha, 1.0 - 1.0 / float(iteration + 1))
+        if not step_skipped:
+            update_ema(model, teacher, ema_alpha)
+        else:
+            print(f"  [WARNING] skipped non-finite optimizer step at iteration {iteration}")
 
         if iteration % args.log_interval == 0 or iteration == 1:
             elapsed = time.time() - start
-            trusted = pseudo_weight.mean().item()
-            loss_value = loss_source.item() + args.mix_loss_weight * loss_mix.item()
+            loss_value = loss_source.item() + mix_weight * loss_mix_value
+            phase = "warmup" if mix_weight == 0.0 else "dacs"
+            grad_text = "n/a" if grad_norm is None else f"{grad_norm:.3f}"
             print(
-                f"iter {iteration:05d}/{args.iters} "
+                f"iter {iteration:05d}/{args.iters} phase={phase} "
                 f"loss={loss_value:.4f} src={loss_source.item():.4f} "
-                f"mix={loss_mix.item():.4f} pseudo_w={trusted:.3f} "
-                f"time={elapsed:.1f}s"
+                f"mix={loss_mix_value:.4f} mix_w={mix_weight:.3f} "
+                f"pseudo_w={pseudo_weight_mean:.3f} valid={pseudo_valid_ratio:.3f} "
+                f"ema={ema_alpha:.5f} grad={grad_text} time={elapsed:.1f}s"
             )
+            if pseudo_distribution is not None:
+                distribution_text = ", ".join(
+                    f"{name}={pseudo_distribution[index].item():.3f}"
+                    for index, name in enumerate(LABELS)
+                )
+                print(f"  pseudo classes: {distribution_text}")
+                dominant_share, dominant_class = torch.max(pseudo_distribution, dim=0)
+                if dominant_share.item() >= args.collapse_warning_threshold:
+                    print(
+                        "  [WARNING] pseudo-label collapse risk: "
+                        f"{LABELS[dominant_class.item()]}={dominant_share.item():.3f}"
+                    )
 
-        if iteration % args.save_interval == 0 or iteration == args.iters:
+        stage_boundary = iteration in {
+            args.warmup_iters,
+            args.warmup_iters + args.mix_ramp_iters,
+        }
+        if iteration % args.save_interval == 0 or iteration == args.iters or stage_boundary:
             ckpt_path = os.path.join(args.out_dir, f"dacs_multimodal_iter_{iteration}.pth")
             torch.save(
                 {
                     "model": model.state_dict(),
                     "teacher": teacher.state_dict(),
                     "optimizer": optimizer.state_dict(),
+                    "scaler": scaler.state_dict(),
                     "iteration": iteration,
                     "args": vars(args),
                 },
@@ -425,12 +547,22 @@ def parse_args():
     parser.add_argument("--source-length", type=int, default=10000)
     parser.add_argument("--target-length", type=int, default=10000)
     parser.add_argument("--iters", type=int, default=4000)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=1e-4, help="Decoder/fusion head learning rate.")
+    parser.add_argument("--backbone-lr", type=float, default=1e-5)
     parser.add_argument("--weight-decay", type=float, default=0.01)
-    parser.add_argument("--ema-alpha", type=float, default=0.9)
-    parser.add_argument("--pseudo-threshold", type=float, default=0.7)
+    parser.add_argument("--ema-alpha", type=float, default=0.999)
+    parser.add_argument("--warmup-iters", type=int, default=500)
+    parser.add_argument("--mix-ramp-iters", type=int, default=1000)
+    parser.add_argument("--pseudo-threshold", type=float, default=0.95)
     parser.add_argument("--pseudo-kernel-size", type=int, default=7)
     parser.add_argument("--mix-loss-weight", type=float, default=1.0)
+    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument(
+        "--collapse-warning-threshold",
+        type=float,
+        default=0.8,
+        help="Warn when one class exceeds this fraction of target pseudo labels.",
+    )
     parser.add_argument(
         "--source-checkpoint",
         default=DEFAULT_SOURCE_CHECKPOINT,
@@ -443,12 +575,18 @@ def parse_args():
     )
     parser.add_argument("--pretrained", action="store_true")
     parser.add_argument("--weight-path", default="")
-    parser.add_argument("--out-dir", default="./results_experiment_c")
+    parser.add_argument("--out-dir", default="./results_experiment_c_stable")
     parser.add_argument(
         "--amp",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Use CUDA automatic mixed precision (enabled by default).",
+    )
+    parser.add_argument(
+        "--freeze-bn",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Freeze BatchNorm running statistics (enabled by default for batch size 1).",
     )
     parser.add_argument("--cache", action="store_true")
     parser.add_argument("--cpu", action="store_true")

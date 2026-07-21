@@ -123,8 +123,10 @@ def compute_metrics(cm):
 
     return {
         "OA": oa,
-        "mIoU": np.nanmean(iou),
-        "mF1": np.nanmean(f1),
+        "mIoU_all": np.nanmean(iou),
+        "mIoU_no_clutter": np.nanmean(iou[:-1]),
+        "mF1_all": np.nanmean(f1),
+        "mF1_no_clutter": np.nanmean(f1[:-1]),
         "IoU": iou,
         "F1": f1,
         "Acc": acc,
@@ -187,9 +189,11 @@ def evaluate(args):
     metrics = compute_metrics(cm)
     print("\nConfusion matrix:")
     print(cm)
-    print(f"\nOA   : {metrics['OA']:.4f}")
-    print(f"mIoU : {metrics['mIoU']:.4f}")
-    print(f"mF1  : {metrics['mF1']:.4f}")
+    print(f"\nOA                 : {metrics['OA']:.4f}")
+    print(f"mIoU (all 6)       : {metrics['mIoU_all']:.4f}")
+    print(f"mIoU (no clutter)  : {metrics['mIoU_no_clutter']:.4f}")
+    print(f"mF1  (all 6)       : {metrics['mF1_all']:.4f}")
+    print(f"mF1  (no clutter)  : {metrics['mF1_no_clutter']:.4f}")
     print("\nPer-class metrics:")
     for idx, name in enumerate(LABELS):
         print(

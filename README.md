@@ -29,15 +29,22 @@ python train_dacs_multimodal.py \
   --source Potsdam2 \
   --target Vaihingen \
   --source-checkpoint ./resultsp2/UNetformer_epoch47_0.8442.pth \
-  --out-dir ./results_experiment_c
+  --out-dir ./results_experiment_c_stable
 ```
+
+The anti-collapse defaults use 500 source-only warm-up iterations, ramp the
+DACS mix loss over the next 1000 iterations, freeze BatchNorm statistics, use
+`1e-5` for both ConvNeXt backbones and `1e-4` for the fusion/decoder head, set
+EMA momentum to `0.999`, and reject target pseudo labels below `0.95` confidence.
+Training logs include the target pseudo-label class distribution and warn when
+one class occupies 80% or more of the predictions.
 
 Only after adaptation is complete, evaluate the EMA teacher on the held-out
 Vaihingen test tiles:
 
 ```bash
 python eval_dacs_multimodal.py \
-  --checkpoint ./results_experiment_c/dacs_multimodal_iter_4000.pth \
+  --checkpoint ./results_experiment_c_stable/dacs_multimodal_iter_4000.pth \
   --weight-key teacher \
   --domain Vaihingen \
   --split test
