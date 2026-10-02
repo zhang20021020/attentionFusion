@@ -8,6 +8,7 @@ from torchvision.utils import make_grid
 from PIL import Image
 from skimage import io
 import os
+from category_guidance import normalize_dsm
 
 # Parameters
 ## SwinFusion
@@ -16,7 +17,7 @@ WINDOW_SIZE = (256, 256)  # Patch size
 STRIDE = 32  # Stride for testing
 IN_CHANNELS = 3  # Number of input channels (e.g. RGB)
 # FOLDER = "/ISPRS_dataset/" # Replace with your "/path/to/the/ISPRS/dataset/folder/"
-FOLDER = "F:/ISPRS_dataset/ISPRS_dataset/"
+FOLDER = "/home/zhangben/ISPRS_dataset/"
 BATCH_SIZE = 5
 # BATCH_SIZE = 4 # For backbone ViT-Huge
 
@@ -39,10 +40,18 @@ invert_palette = {v: k for k, v in palette.items()}
 
 MODEL = 'UNetformer'
 # MODEL = 'FTUNetformer'
-# MODE = 'Train'
-MODE = 'Test'
-DATASET = 'Vaihingen'
-# DATASET = 'Potsdam'
+MODE = 'Train'
+CHECKPOINT_PATH = None  # Set a trained experiment checkpoint when MODE == 'Test'.
+MODEL_OPTIONS = dict(
+    use_category_supervision=True,
+    use_confidence_fusion=True,
+    use_category_pan=True,
+    use_dsm_geometry=True,
+)
+LOSS_OPTIONS = dict(category_weight=0.4, pan_weight=0.2, decoder_weight=0.0,
+                    ignore_index=6)
+# DATASET = 'Vaihingen'
+DATASET = 'Potsdam'
 IF_SAM = True
 # IF_SAM = False
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -188,9 +197,7 @@ class ISPRS_dataset(torch.utils.data.Dataset):
         else:
             # DSM is normalized in [0, 1]
             dsm = np.asarray(io.imread(self.dsm_files[random_idx]), dtype='float32')
-            min = np.min(dsm)
-            max = np.max(dsm)
-            dsm = (dsm - min) / (max - min)
+            dsm = normalize_dsm(dsm)
             if self.cache:
                 self.dsm_cache_[random_idx] = dsm
 

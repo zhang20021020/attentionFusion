@@ -10,6 +10,9 @@ import torch.autograd as autograd
 from MedSAM.models.sam import sam_model_registry
 import MedSAM.cfg as cfg
 import matplotlib.pyplot as plt
+from category_guidance import (DSMGeometryInput, CategoryPrediction,
+                               ConfidenceFeatureFusion, CategoryGuidedPAN,
+                               calibrate_categories)
 
 
 class Norm2d(nn.Module):
@@ -311,8 +314,8 @@ class Block(nn.Module):
                 amask_out = torch.cat([amask_out, mask_i], -1)  # b*64*64*6
         amask_dia_max = self.MAX(amask_out)
         amask_dia_max = amask_dia_max.repeat(1, 1, self.ca_num_heads)
-        mask_good = torch.where(amask_out == amask_dia_max, torch.Tensor([1]).cuda(self.device),
-                                torch.Tensor([-1]).cuda(self.device))
+        mask_good = torch.where(amask_out == amask_dia_max, torch.ones_like(amask_out),
+                                -torch.ones_like(amask_out))
         mask_good = mask_good.permute(0, 2, 1).contiguous()
         mask_good = torch.chunk(mask_good, self.ca_num_heads, dim=1)
         s_out = torch.chunk(s_out, self.ca_num_heads, dim=1)  # 6*b*64*64
@@ -401,13 +404,14 @@ class Detail_Recovery(nn.Module):
         feature_map_pad = F.pad(qp, (4, 4, 4, 4), 'constant', 0)  # 5*5    dialation=2
         unfolded = feature_map_pad.unfold(2, 9, 1).unfold(3, 9, 1)
         unfolded = unfolded.reshape(B, C, H * W, 9, 9)
-        unfolded = torch.index_select(unfolded, -1, torch.tensor([0, 2, 4, 6, 8]).cuda(self.device))
-        unfolded = torch.index_select(unfolded, -2, torch.tensor([0, 2, 4, 6, 8]).cuda(self.device))
+        indices = torch.tensor([0, 2, 4, 6, 8], device=qp.device)
+        unfolded = torch.index_select(unfolded, -1, indices)
+        unfolded = torch.index_select(unfolded, -2, indices)
         q = unfolded.reshape(B, C, H * W, 25).permute(0, 2, 3, 1).contiguous()  # B*(HW)*(9)*C
 
 
         point_aware = point_center @ q.transpose(-2, -1)  # 3*3=4  5*5=12 7*7=24
-        point_aware = point_aware.index_fill_(-1, torch.LongTensor([12]).cuda(self.device),
+        point_aware = point_aware.index_fill_(-1, torch.tensor([12], device=qp.device),
                                               0)  # !!!!!!!!!!!!!!!!!!!!!!!!
         point_aware_attn = point_aware.softmax(dim=-1)
         point_center_aware = point_aware_attn @ q  # B*(HW)*1*C
@@ -650,17 +654,23 @@ class SqueezeAndExcitation(nn.Module):
 
 
 class SEFusion(nn.Module):
-    def __init__(self, channels_in, activation=nn.ReLU(inplace=True)):
+    def __init__(self, channels_in, activation=nn.ReLU(inplace=True), num_classes=None):
         super(SEFusion, self).__init__()
 
         self.se_rgb = SqueezeAndExcitation(channels_in,
                                            activation=activation)
         self.se_depth = SqueezeAndExcitation(channels_in,
                                              activation=activation)
+        self.confidence_fusion = (ConfidenceFeatureFusion(channels_in, num_classes)
+                                  if num_classes is not None else None)
 
-    def forward(self, rgb, depth):
+    def forward(self, rgb, depth, rgb_share=None):
         rgb = self.se_rgb(rgb)
         depth = self.se_depth(depth)
+        if self.confidence_fusion is not None:
+            if rgb_share is None:
+                raise ValueError("Confidence fusion requires supervised category predictions.")
+            return self.confidence_fusion(rgb, depth, rgb_share)
         out = rgb + depth
         return out
 
@@ -745,9 +755,18 @@ class UNetFormer(nn.Module):
                  decode_channels=64,
                  dropout=0.1,
                  window_size=8,
-                 num_classes=6
+                 num_classes=6,
+                 use_category_supervision=True,
+                 use_confidence_fusion=True,
+                 use_category_pan=True,
+                 use_dsm_geometry=True
                  ):
         super().__init__()
+        if not use_category_supervision and (use_confidence_fusion or use_category_pan):
+            raise ValueError("Confidence fusion and category PAN require category supervision.")
+        self.use_category_supervision = use_category_supervision
+        self.use_category_pan = use_category_pan
+        self.dsm_input = DSMGeometryInput(enabled=use_dsm_geometry)
         args = cfg.parse_args()
         self.sam = sam_model_registry["vit_l"](args, checkpoint='weights/sam_vit_l_0b3195.pth')
         self.image_encoder = self.sam.image_encoder
@@ -778,10 +797,23 @@ class UNetFormer(nn.Module):
         self.fpn4y = nn.MaxPool2d(kernel_size=2, stride=2)
 
 
-        self.fusion1 = SEFusion(encoder_channels[0])
-        self.fusion2 = SEFusion(encoder_channels[1])
-        self.fusion3 = SEFusion(encoder_channels[2])
+        fusion_classes = num_classes if use_confidence_fusion else None
+        self.fusion1 = SEFusion(encoder_channels[0], num_classes=fusion_classes)
+        self.fusion2 = SEFusion(encoder_channels[1], num_classes=fusion_classes)
+        self.fusion3 = SEFusion(encoder_channels[2], num_classes=fusion_classes)
         self.fusion4 = SEFusion(encoder_channels[3])
+        if use_category_supervision:
+            self.rgb_category_heads = nn.ModuleList([
+                CategoryPrediction(c, num_classes) for c in encoder_channels
+            ])
+            self.dsm_category_heads = nn.ModuleList([
+                CategoryPrediction(c, num_classes) for c in encoder_channels
+            ])
+        if use_category_pan:
+            self.category_pan = CategoryGuidedPAN(256, num_classes)
+            self.pan_category_heads = nn.ModuleList([
+                CategoryPrediction(c, num_classes) for c in encoder_channels
+            ])
         # ✅ 新增：Encoder 金字塔 BAM
         self.bam1 = BAM(encoder_channels[0])
         self.bam2 = BAM(encoder_channels[1])
@@ -816,7 +848,7 @@ class UNetFormer(nn.Module):
 
     def forward(self, x, y, mode='Train'):
         h, w = x.size()[-2:]
-        y = torch.unsqueeze(y, dim=1).repeat(1, 3, 1, 1)
+        y = self.dsm_input(y)
         deepx, deepy = self.image_encoder(x, y)  # 256x16x16
 
         res1x = self.fpn1x(deepx)
@@ -827,9 +859,22 @@ class UNetFormer(nn.Module):
         res2y = self.fpn2y(deepy)
         res3y = self.fpn3y(deepy)
         res4y = self.fpn4y(deepy)
-        res1 = self.fusion1(res1x, res1y)
-        res2 = self.fusion2(res2x, res2y)
-        res3 = self.fusion3(res3x, res3y)
+        rgb_features = [res1x, res2x, res3x, res4x]
+        dsm_features = [res1y, res2y, res3y, res4y]
+        auxiliary = {}
+        shares = [None] * 4
+        if self.use_category_supervision:
+            rgb_logits = [head(f) for head, f in zip(self.rgb_category_heads, rgb_features)]
+            dsm_logits = [head(f) for head, f in zip(self.dsm_category_heads, dsm_features)]
+            calibrated = [calibrate_categories(r, d) for r, d in zip(rgb_logits, dsm_logits)]
+            categories = [item[0] for item in calibrated]
+            shares = [item[1] for item in calibrated]
+            auxiliary.update(rgb=rgb_logits, dsm=dsm_logits)
+            if self.use_category_pan:
+                guidance = self.category_pan(categories)
+        res1 = self.fusion1(res1x, res1y, shares[0])
+        res2 = self.fusion2(res2x, res2y, shares[1])
+        res3 = self.fusion3(res3x, res3y, shares[2])
         res4 = self.fusion4(res4x, res4y)
         # ✅ BAM 在融合后强化特征
         res1 = self.bam1(res1)
@@ -845,23 +890,38 @@ class UNetFormer(nn.Module):
 
         # N2 直接等于 P2
         N2 = P2
+        if self.use_category_pan:
+            N2 = self.category_pan.gate(N2, guidance[0], 0)
 
         # N3 = Down(N2) + P3
-        N3 = self.down3(N2) + P3
+        transfer = self.down3(N2)
+        if self.use_category_pan:
+            transfer = self.category_pan.gate(transfer, guidance[1], 1)
+        N3 = transfer + P3
         N3 = self.smooth3(N3)
 
         # N4 = Down(N3) + P4
-        N4 = self.down4(N3) + P4
+        transfer = self.down4(N3)
+        if self.use_category_pan:
+            transfer = self.category_pan.gate(transfer, guidance[2], 2)
+        N4 = transfer + P4
         N4 = self.smooth4(N4)
 
         # N5 = Down(N4) + P5
-        N5 = self.down5(N4) + P5
+        transfer = self.down5(N4)
+        if self.use_category_pan:
+            transfer = self.category_pan.gate(transfer, guidance[3], 3)
+        N5 = transfer + P5
         N5 = self.smooth5(N5)
 
         # ✅【修改2】【修改3】使用新 decoder，适配 x_list 输入形式，返回 sh 辅助输出
         if self.training:
             x, sh = self.decoder([N2, N3, N4, N5])
-            return x, sh
+            auxiliary["decoder"] = sh
+            if self.use_category_pan:
+                auxiliary["pan"] = [head(f) for head, f in zip(
+                    self.pan_category_heads, [N2, N3, N4, N5])]
+            return x, auxiliary if self.use_category_supervision else sh
         else:
             x = self.decoder([N2, N3, N4, N5])
             return x

@@ -1,4 +1,3 @@
-import os
 import numpy as np
 from glob import glob
 # from tqdm import tqdm_notebook as tqdm  # 已移除进度条
@@ -18,7 +17,7 @@ from utils import *
 from torch.autograd import Variable
 from IPython.display import clear_output
 from UNetFormer_MMSAM import UNetFormer as MFNet
-from train_logs import export_train_metrics
+from segmentation_loss import segmentation_loss
 
 
 import random
@@ -62,19 +61,17 @@ print("torch sees {} GPUs".format(torch.cuda.device_count()))
 print("Current device:", torch.cuda.current_device())
 print("Device name:", torch.cuda.get_device_name(torch.cuda.current_device()))
 
-net = MFNet(num_classes=N_CLASSES).cuda()
-
-metrics_csv = os.path.join("logs", "{}_{}_train_metrics.csv".format(MODEL, DATASET))
-metrics_row = export_train_metrics(
-    net,
-    metrics_csv,
-    model_name=MODEL,
-    dataset_name=DATASET,
-    image_size=WINDOW_SIZE,
-    batch_size=1,
-)
-print("Train metrics exported to:", metrics_csv)
-print(metrics_row)
+if MODEL_OPTIONS['use_category_supervision'] and LOSS_OPTIONS['category_weight'] <= 0:
+    raise ValueError('Category prediction heads require a positive category_weight.')
+if MODE == 'Test' and not CHECKPOINT_PATH:
+    raise ValueError('Set CHECKPOINT_PATH in utils.py to the trained experiment checkpoint.')
+net = MFNet(num_classes=N_CLASSES, **MODEL_OPTIONS).cuda()
+experiment_name = MODEL + '_' + '_'.join(
+    '{}{}'.format(name, int(MODEL_OPTIONS[key])) for name, key in (
+        ('sup', 'use_category_supervision'), ('conf', 'use_confidence_fusion'),
+        ('pan', 'use_category_pan'), ('geo', 'use_dsm_geometry')))
+print('Experiment:', experiment_name)
+print('Loss weights:', LOSS_OPTIONS)
 
 
 
@@ -132,6 +129,7 @@ def test(net, test_ids, all=False, stride=WINDOW_SIZE[0], batch_size=BATCH_SIZE,
     with torch.no_grad():
         for img, dsm, gt, gt_e in zip(test_images, test_dsms, test_labels, eroded_labels):
             pred = np.zeros(img.shape[:2] + (N_CLASSES,))
+            norm_dsm = normalize_dsm(dsm)
 
             total = count_sliding_window(img, step=stride, window_size=window_size) // batch_size
             for i, coords in enumerate(grouper(batch_size, sliding_window(img, step=stride, window_size=window_size))):
@@ -139,8 +137,6 @@ def test(net, test_ids, all=False, stride=WINDOW_SIZE[0], batch_size=BATCH_SIZE,
                 image_patches = np.asarray(image_patches)
                 image_patches = Variable(torch.from_numpy(image_patches).cuda(), volatile=True)
 
-                mn, mx = dsm.min(), dsm.max()
-                norm_dsm = (dsm - mn) / (mx - mn)
                 dsm_patches = [np.copy(norm_dsm[x:x + w, y:y + h]) for x, y, w, h in coords]
                 dsm_patches = np.asarray(dsm_patches)
                 dsm_patches = Variable(torch.from_numpy(dsm_patches).cuda(), volatile=True)
@@ -176,7 +172,7 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
     weights = weights.cuda()
 
     iter_         = 0
-    MIoU_best     = 0.83
+    MIoU_best     = float('-inf')
     epoch_losses  = []
 
     for e in range(1, epochs + 1):
@@ -188,10 +184,10 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
         for batch_idx, (data, dsm, target) in enumerate(train_loader):
             data, dsm, target = Variable(data.cuda()), Variable(dsm.cuda()), Variable(target.cuda())
             optimizer.zero_grad()
-            output = net(data, dsm, mode='Train')
-            if isinstance(output, tuple):
-                output = output[0]
-            loss = CrossEntropy2d(output, target, weight=weights)
+            model_output = net(data, dsm, mode='Train')
+            loss, loss_terms = segmentation_loss(model_output, target, weight=weights,
+                                                  **LOSS_OPTIONS)
+            output = model_output[0] if isinstance(model_output, tuple) else model_output
             loss.backward()
             optimizer.step()
 
@@ -206,8 +202,10 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
                 print('Train (epoch {}/{}) [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tAccuracy: {}'.format(
                     e, epochs, batch_idx, len(train_loader),
                     100. * batch_idx / len(train_loader), loss.data, accuracy(pred, gt)))
+                print('Loss terms:', {name: round(value.detach().item(), 6)
+                                      for name, value in loss_terms.items()})
             iter_ += 1
-            del data, target, loss
+            del data, dsm, target, loss, model_output, output, loss_terms
 
         # 每个epoch结束，计算当前epoch的平均loss
         epoch_mean_loss = np.mean(losses[max(0, iter_ - len(train_loader)):iter_])
@@ -222,10 +220,14 @@ def train(net, optimizer, epochs, scheduler=None, weights=WEIGHTS, save_epoch=1)
             test_time = time.time()
             print("Test time: {:.3f} seconds".format(test_time - train_time))
             if MIoU > MIoU_best:
-                if DATASET == 'Vaihingen':
-                    torch.save(net.state_dict(), './resultsv/{}_epoch{}_{}'.format(MODEL, e, MIoU))
-                elif DATASET == 'Potsdam':
-                    torch.save(net.state_dict(), './resultsp/{}_epoch{}_{}'.format(MODEL, e, MIoU))
+                result_dir = './resultsv' if DATASET == 'Vaihingen' else './resultsp'
+                os.makedirs(result_dir, exist_ok=True)
+                torch.save(dict(model_state_dict=net.state_dict(), model_options=MODEL_OPTIONS,
+                                loss_options=LOSS_OPTIONS, num_classes=N_CLASSES, epoch=e,
+                                miou=float(MIoU), seed=SEED, dataset=DATASET,
+                                train_ids=train_ids, test_ids=test_ids, window_size=WINDOW_SIZE),
+                           os.path.join(result_dir, '{}_epoch{}_{}.pth'.format(
+                               experiment_name, e, MIoU)))
                 MIoU_best = MIoU
 
     print('MIoU_best: ', MIoU_best)
@@ -246,8 +248,18 @@ if MODE == 'Train':
     train(net, optimizer, epochs, scheduler, weights=WEIGHTS, save_epoch=save_epoch)
 
 elif MODE == 'Test':
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu')
+    if 'model_state_dict' in checkpoint:
+        if checkpoint['model_options'] != MODEL_OPTIONS or checkpoint['num_classes'] != N_CLASSES:
+            raise ValueError('MODEL_OPTIONS / N_CLASSES must match the saved checkpoint.')
+        state_dict = checkpoint['model_state_dict']
+    else:
+        if any(MODEL_OPTIONS.values()):
+            raise ValueError('Legacy checkpoints require all MODEL_OPTIONS disabled. '
+                             'Train the new modules before testing them.')
+        state_dict = checkpoint
+    net.load_state_dict(state_dict, strict=True)
     if DATASET == 'Vaihingen':
-        net.load_state_dict(torch.load('F:\model\modelsv/UNetformer_epoch26_0.8484.pth'), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)
@@ -256,7 +268,6 @@ elif MODE == 'Test':
             io.imsave('./resultsv/inference_UNetFormer_{}_tile_{}.png'.format('huge', id_), img)
 
     elif DATASET == 'Potsdam':
-        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch41_0.8573.pth'), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)
