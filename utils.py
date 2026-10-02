@@ -40,8 +40,9 @@ invert_palette = {v: k for k, v in palette.items()}
 
 MODEL = 'UNetformer'
 # MODEL = 'FTUNetformer'
-MODE = 'Train'
-CHECKPOINT_PATH = None  # Set a trained experiment checkpoint when MODE == 'Test'.
+# MODE = 'Train'
+MODE = 'Test'
+CHECKPOINT_PATH =  './resultsp/UNetformer_sup1_conf1_pan1_geo1_epoch44_0.8601.pth'
 MODEL_OPTIONS = dict(
     use_category_supervision=True,
     use_confidence_fusion=True,
