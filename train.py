@@ -247,7 +247,7 @@ if MODE == 'Train':
 
 elif MODE == 'Test':
     if DATASET == 'Vaihingen':
-        net.load_state_dict(torch.load('F:\model\modelsv/UNetformer_epoch26_0.8484.pth'), strict=False)
+        net.load_state_dict(torch.load('./resultsv//UNetformer_epoch34_0.8467.pth'), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)
@@ -256,7 +256,7 @@ elif MODE == 'Test':
             io.imsave('./resultsv/inference_UNetFormer_{}_tile_{}.png'.format('huge', id_), img)
 
     elif DATASET == 'Potsdam':
-        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch41_0.8573.pth'), strict=False)
+        net.load_state_dict(torch.load('./resultsp/UNetformer_epoch50_0.8575.pth'), strict=False)
         net.eval()
         MIoU, all_preds, all_gts = test(net, test_ids, all=True, stride=32)
         print("MIoU: ", MIoU)
