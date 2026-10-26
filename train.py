@@ -69,7 +69,10 @@ net = MFNet(num_classes=N_CLASSES, **MODEL_OPTIONS).cuda()
 experiment_name = MODEL + '_' + '_'.join(
     '{}{}'.format(name, int(MODEL_OPTIONS[key])) for name, key in (
         ('sup', 'use_category_supervision'), ('conf', 'use_confidence_fusion'),
-        ('pan', 'use_category_pan'), ('geo', 'use_dsm_geometry')))
+        ('pan', 'use_category_pan'), ('geo', 'use_dsm_geometry'),
+        ('n2', 'use_n2_category_gate')))
+experiment_name += '_cw{:g}_pw{:g}_seed{}'.format(
+    LOSS_OPTIONS['category_weight'], LOSS_OPTIONS['pan_weight'], SEED)
 print('Experiment:', experiment_name)
 print('Loss weights:', LOSS_OPTIONS)
 
@@ -250,11 +253,14 @@ if MODE == 'Train':
 elif MODE == 'Test':
     checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu')
     if 'model_state_dict' in checkpoint:
-        if checkpoint['model_options'] != MODEL_OPTIONS or checkpoint['num_classes'] != N_CLASSES:
+        saved_options = dict(checkpoint['model_options'])
+        # Checkpoints created before the N2 ablation always applied this gate.
+        saved_options.setdefault('use_n2_category_gate', True)
+        if saved_options != MODEL_OPTIONS or checkpoint['num_classes'] != N_CLASSES:
             raise ValueError('MODEL_OPTIONS / N_CLASSES must match the saved checkpoint.')
         state_dict = checkpoint['model_state_dict']
     else:
-        if any(MODEL_OPTIONS.values()):
+        if any(value for key, value in MODEL_OPTIONS.items() if key != 'use_n2_category_gate'):
             raise ValueError('Legacy checkpoints require all MODEL_OPTIONS disabled. '
                              'Train the new modules before testing them.')
         state_dict = checkpoint

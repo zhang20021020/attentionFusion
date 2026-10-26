@@ -42,16 +42,19 @@ MODEL = 'UNetformer'
 # MODEL = 'FTUNetformer'
 MODE = 'Train'
 CHECKPOINT_PATH = None  # Set a trained experiment checkpoint when MODE == 'Test'.
+# (N2 gate, DSM geometry): R0=(True, True), R1=(False, True), R2=(True, False).
+# Keep category PAN enabled in both single-factor experiments.
 MODEL_OPTIONS = dict(
     use_category_supervision=True,
     use_confidence_fusion=True,
     use_category_pan=True,
     use_dsm_geometry=True,
+    use_n2_category_gate=False,
 )
-LOSS_OPTIONS = dict(category_weight=0.4, pan_weight=0.2, decoder_weight=0.0,
+LOSS_OPTIONS = dict(category_weight=0.1, pan_weight=0.05, decoder_weight=0.0,
                     ignore_index=6)
-# DATASET = 'Vaihingen'
-DATASET = 'Potsdam'
+DATASET = 'Vaihingen'
+# DATASET = 'Potsdam'
 IF_SAM = True
 # IF_SAM = False
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"

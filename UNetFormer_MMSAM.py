@@ -759,13 +759,15 @@ class UNetFormer(nn.Module):
                  use_category_supervision=True,
                  use_confidence_fusion=True,
                  use_category_pan=True,
-                 use_dsm_geometry=True
+                 use_dsm_geometry=True,
+                 use_n2_category_gate=True
                  ):
         super().__init__()
         if not use_category_supervision and (use_confidence_fusion or use_category_pan):
             raise ValueError("Confidence fusion and category PAN require category supervision.")
         self.use_category_supervision = use_category_supervision
         self.use_category_pan = use_category_pan
+        self.use_n2_category_gate = use_n2_category_gate
         self.dsm_input = DSMGeometryInput(enabled=use_dsm_geometry)
         args = cfg.parse_args()
         self.sam = sam_model_registry["vit_l"](args, checkpoint='weights/sam_vit_l_0b3195.pth')
@@ -890,7 +892,7 @@ class UNetFormer(nn.Module):
 
         # N2 直接等于 P2
         N2 = P2
-        if self.use_category_pan:
+        if self.use_category_pan and self.use_n2_category_gate:
             N2 = self.category_pan.gate(N2, guidance[0], 0)
 
         # N3 = Down(N2) + P3
