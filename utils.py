@@ -40,8 +40,8 @@ invert_palette = {v: k for k, v in palette.items()}
 
 MODEL = 'UNetformer'
 # MODEL = 'FTUNetformer'
-# MODE = 'Train'
-MODE = 'Test'
+MODE = 'Train'
+# MODE = 'Test'
 CHECKPOINT_PATH =  './resultsp/UNetformer_sup1_conf1_pan1_geo1_epoch44_0.8601.pth'
 MODEL_OPTIONS = dict(
     use_category_supervision=True,
@@ -49,8 +49,12 @@ MODEL_OPTIONS = dict(
     use_category_pan=True,
     use_dsm_geometry=True,
 )
-LOSS_OPTIONS = dict(category_weight=0.4, pan_weight=0.2, decoder_weight=0.0,
-                    ignore_index=6)
+LOSS_OPTIONS = dict(
+    category_weight=0.1,
+    pan_weight=0.05,
+    decoder_weight=0.0,
+    ignore_index=6,
+)
 # DATASET = 'Vaihingen'
 DATASET = 'Potsdam'
 IF_SAM = True
