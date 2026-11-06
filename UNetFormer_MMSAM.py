@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from category_guidance import (DSMGeometryInput, CategoryPrediction,
                                ConfidenceFeatureFusion, CategoryGuidedPAN,
                                calibrate_categories)
+from dsm_geometry import DSMGeometryBranch
 
 
 class Norm2d(nn.Module):
@@ -760,11 +761,16 @@ class UNetFormer(nn.Module):
                  use_confidence_fusion=True,
                  use_category_pan=True,
                  use_dsm_geometry=True,
-                 use_n2_category_gate=True
+                 use_n2_category_gate=True,
+                 use_dsm_geometry_branch=False,
+                 dsm_geometry_windows=(9, 25)
                  ):
         super().__init__()
         if not use_category_supervision and (use_confidence_fusion or use_category_pan):
             raise ValueError("Confidence fusion and category PAN require category supervision.")
+        if use_dsm_geometry_branch and use_dsm_geometry:
+            raise ValueError("Set use_dsm_geometry=False with the geometry branch: "
+                             "the original encoder must keep its [D,D,D] input.")
         self.use_category_supervision = use_category_supervision
         self.use_category_pan = use_category_pan
         self.use_n2_category_gate = use_n2_category_gate
@@ -848,8 +854,13 @@ class UNetFormer(nn.Module):
         # ❌（旧版 decoder 已注释保留）
         # self.decoder = Decoder(encoder_channels, decode_channels, dropout, window_size, num_classes)
 
+        # Construct after the existing modules to preserve their seeded initialization.
+        self.dsm_geometry_branch = (DSMGeometryBranch(256, dsm_geometry_windows)
+                                    if use_dsm_geometry_branch else None)
+
     def forward(self, x, y, mode='Train'):
         h, w = x.size()[-2:]
+        raw_dsm = y
         y = self.dsm_input(y)
         deepx, deepy = self.image_encoder(x, y)  # 256x16x16
 
@@ -863,6 +874,9 @@ class UNetFormer(nn.Module):
         res4y = self.fpn4y(deepy)
         rgb_features = [res1x, res2x, res3x, res4x]
         dsm_features = [res1y, res2y, res3y, res4y]
+        if self.dsm_geometry_branch is not None:
+            dsm_features = self.dsm_geometry_branch(raw_dsm, rgb_features, dsm_features)
+            res1y, res2y, res3y, res4y = dsm_features
         auxiliary = {}
         shares = [None] * 4
         if self.use_category_supervision:

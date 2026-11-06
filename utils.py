@@ -47,8 +47,10 @@ MODEL_OPTIONS = dict(
     use_category_supervision=True,
     use_confidence_fusion=True,
     use_category_pan=True,
-    use_dsm_geometry=True,
+    use_dsm_geometry=False,
     use_n2_category_gate=False,
+    use_dsm_geometry_branch=True,  # New residual branch; False restores the R2 architecture.
+    dsm_geometry_windows=(9, 25),  # Local windows in pixels; saved with the checkpoint.
 )
 LOSS_OPTIONS = dict(category_weight=0.1, pan_weight=0.05, decoder_weight=0.0,
                     ignore_index=6)

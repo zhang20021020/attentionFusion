@@ -18,6 +18,7 @@ from torch.autograd import Variable
 from IPython.display import clear_output
 from UNetFormer_MMSAM import UNetFormer as MFNet
 from segmentation_loss import segmentation_loss
+from checkpoint_utils import checkpoint_state_dict
 
 
 import random
@@ -70,10 +71,13 @@ experiment_name = MODEL + '_' + '_'.join(
     '{}{}'.format(name, int(MODEL_OPTIONS[key])) for name, key in (
         ('sup', 'use_category_supervision'), ('conf', 'use_confidence_fusion'),
         ('pan', 'use_category_pan'), ('geo', 'use_dsm_geometry'),
-        ('n2', 'use_n2_category_gate')))
+        ('n2', 'use_n2_category_gate'), ('gbr', 'use_dsm_geometry_branch')))
+if MODEL_OPTIONS['use_dsm_geometry_branch']:
+    experiment_name += '_gw' + 'x'.join(str(k) for k in MODEL_OPTIONS['dsm_geometry_windows'])
 experiment_name += '_cw{:g}_pw{:g}_seed{}'.format(
     LOSS_OPTIONS['category_weight'], LOSS_OPTIONS['pan_weight'], SEED)
 print('Experiment:', experiment_name)
+print('Model options:', MODEL_OPTIONS)
 print('Loss weights:', LOSS_OPTIONS)
 
 
@@ -252,18 +256,7 @@ if MODE == 'Train':
 
 elif MODE == 'Test':
     checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu')
-    if 'model_state_dict' in checkpoint:
-        saved_options = dict(checkpoint['model_options'])
-        # Checkpoints created before the N2 ablation always applied this gate.
-        saved_options.setdefault('use_n2_category_gate', True)
-        if saved_options != MODEL_OPTIONS or checkpoint['num_classes'] != N_CLASSES:
-            raise ValueError('MODEL_OPTIONS / N_CLASSES must match the saved checkpoint.')
-        state_dict = checkpoint['model_state_dict']
-    else:
-        if any(value for key, value in MODEL_OPTIONS.items() if key != 'use_n2_category_gate'):
-            raise ValueError('Legacy checkpoints require all MODEL_OPTIONS disabled. '
-                             'Train the new modules before testing them.')
-        state_dict = checkpoint
+    state_dict = checkpoint_state_dict(checkpoint, MODEL_OPTIONS, N_CLASSES)
     net.load_state_dict(state_dict, strict=True)
     if DATASET == 'Vaihingen':
         net.eval()
