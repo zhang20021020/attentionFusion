@@ -64,6 +64,10 @@ print("Device name:", torch.cuda.get_device_name(torch.cuda.current_device()))
 
 if MODEL_OPTIONS['use_category_supervision'] and LOSS_OPTIONS['category_weight'] <= 0:
     raise ValueError('Category prediction heads require a positive category_weight.')
+if MODE == 'Train' and (MODEL_OPTIONS.get('use_vegetation_aux', False) !=
+                        (LOSS_OPTIONS.get('vegetation_weight', 0) > 0)):
+    raise ValueError('Enable use_vegetation_aux together with a positive vegetation_weight; '
+                     'disable it together with vegetation_weight=0 for an ablation.')
 if MODE == 'Test' and not CHECKPOINT_PATH:
     raise ValueError('Set CHECKPOINT_PATH in utils.py to the trained experiment checkpoint.')
 net = MFNet(num_classes=N_CLASSES, **MODEL_OPTIONS).cuda()
@@ -71,11 +75,13 @@ experiment_name = MODEL + '_' + '_'.join(
     '{}{}'.format(name, int(MODEL_OPTIONS[key])) for name, key in (
         ('sup', 'use_category_supervision'), ('conf', 'use_confidence_fusion'),
         ('pan', 'use_category_pan'), ('geo', 'use_dsm_geometry'),
-        ('n2', 'use_n2_category_gate'), ('gbr', 'use_dsm_geometry_branch')))
+        ('n2', 'use_n2_category_gate'), ('gbr', 'use_dsm_geometry_branch'),
+        ('veg', 'use_vegetation_aux')))
 if MODEL_OPTIONS['use_dsm_geometry_branch']:
     experiment_name += '_gw' + 'x'.join(str(k) for k in MODEL_OPTIONS['dsm_geometry_windows'])
-experiment_name += '_cw{:g}_pw{:g}_seed{}'.format(
-    LOSS_OPTIONS['category_weight'], LOSS_OPTIONS['pan_weight'], SEED)
+experiment_name += '_cw{:g}_pw{:g}_vw{:g}_seed{}'.format(
+    LOSS_OPTIONS['category_weight'], LOSS_OPTIONS['pan_weight'],
+    LOSS_OPTIONS['vegetation_weight'], SEED)
 print('Experiment:', experiment_name)
 print('Model options:', MODEL_OPTIONS)
 print('Loss weights:', LOSS_OPTIONS)

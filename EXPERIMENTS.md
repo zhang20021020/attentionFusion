@@ -1,5 +1,10 @@
 # Category-guided fusion experiments
 
+> The current training-only vegetation head and its `vegetation_weight=0.02`
+> are documented in [VEGETATION_AUX.md](VEGETATION_AUX.md). Set
+> `use_vegetation_aux=False` and `vegetation_weight=0.0` when reproducing the
+> earlier geometry-only or category-guidance experiments below.
+
 > Current extension: the five-channel DSM residual branch is documented in
 > [DSM_GEOMETRY.md](DSM_GEOMETRY.md). The current utils.py uses the R2 settings
 > (legacy Sobel input off, N2 gate off, category/pan weights 0.1/0.05) plus the

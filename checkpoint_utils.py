@@ -2,7 +2,7 @@
 
 FEATURE_FLAGS = (
     "use_category_supervision", "use_confidence_fusion", "use_category_pan",
-    "use_dsm_geometry", "use_dsm_geometry_branch",
+    "use_dsm_geometry", "use_dsm_geometry_branch", "use_vegetation_aux",
 )
 
 
@@ -12,6 +12,8 @@ def _canonical_options(options):
     result.setdefault("use_n2_category_gate", True)
     # Existing R1/R2 checkpoints predate the new geometry branch.
     result.setdefault("use_dsm_geometry_branch", False)
+    # Geometry-only checkpoints predate the training-only vegetation head.
+    result.setdefault("use_vegetation_aux", False)
     windows = tuple(result.pop("dsm_geometry_windows", (9, 25)))
     if result["use_dsm_geometry_branch"]:
         result["dsm_geometry_windows"] = windows
@@ -29,7 +31,7 @@ def checkpoint_state_dict(checkpoint, model_options, num_classes):
         current = _canonical_options(model_options)
         if saved != current or checkpoint["num_classes"] != num_classes:
             raise ValueError("MODEL_OPTIONS / N_CLASSES must match the saved checkpoint, "
-                             "including the geometry branch and its active window sizes.")
+                             "including the vegetation head, geometry branch and active window sizes.")
         return checkpoint["model_state_dict"]
     if any(model_options.get(key, False) for key in FEATURE_FLAGS):
         raise ValueError("Legacy checkpoints require all added feature modules disabled. "

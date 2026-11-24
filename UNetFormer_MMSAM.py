@@ -14,6 +14,7 @@ from category_guidance import (DSMGeometryInput, CategoryPrediction,
                                ConfidenceFeatureFusion, CategoryGuidedPAN,
                                calibrate_categories)
 from dsm_geometry import DSMGeometryBranch
+from vegetation_supervision import VegetationAuxHead
 
 
 class Norm2d(nn.Module):
@@ -763,7 +764,8 @@ class UNetFormer(nn.Module):
                  use_dsm_geometry=True,
                  use_n2_category_gate=True,
                  use_dsm_geometry_branch=False,
-                 dsm_geometry_windows=(9, 25)
+                 dsm_geometry_windows=(9, 25),
+                 use_vegetation_aux=False
                  ):
         super().__init__()
         if not use_category_supervision and (use_confidence_fusion or use_category_pan):
@@ -771,6 +773,10 @@ class UNetFormer(nn.Module):
         if use_dsm_geometry_branch and use_dsm_geometry:
             raise ValueError("Set use_dsm_geometry=False with the geometry branch: "
                              "the original encoder must keep its [D,D,D] input.")
+        if use_vegetation_aux and not use_dsm_geometry_branch:
+            raise ValueError("Vegetation supervision requires use_dsm_geometry_branch=True.")
+        if use_vegetation_aux and num_classes < 4:
+            raise ValueError("Vegetation supervision requires ISPRS class IDs 2 and 3.")
         self.use_category_supervision = use_category_supervision
         self.use_category_pan = use_category_pan
         self.use_n2_category_gate = use_n2_category_gate
@@ -857,6 +863,8 @@ class UNetFormer(nn.Module):
         # Construct after the existing modules to preserve their seeded initialization.
         self.dsm_geometry_branch = (DSMGeometryBranch(256, dsm_geometry_windows)
                                     if use_dsm_geometry_branch else None)
+        # Append last so enabling supervision preserves all existing initial weights.
+        self.vegetation_aux_head = VegetationAuxHead(256) if use_vegetation_aux else None
 
     def forward(self, x, y, mode='Train'):
         h, w = x.size()[-2:]
@@ -878,6 +886,8 @@ class UNetFormer(nn.Module):
             dsm_features = self.dsm_geometry_branch(raw_dsm, rgb_features, dsm_features)
             res1y, res2y, res3y, res4y = dsm_features
         auxiliary = {}
+        if self.training and self.vegetation_aux_head is not None:
+            auxiliary["vegetation"] = self.vegetation_aux_head(res2y)
         shares = [None] * 4
         if self.use_category_supervision:
             rgb_logits = [head(f) for head, f in zip(self.rgb_category_heads, rgb_features)]
@@ -937,7 +947,9 @@ class UNetFormer(nn.Module):
             if self.use_category_pan:
                 auxiliary["pan"] = [head(f) for head, f in zip(
                     self.pan_category_heads, [N2, N3, N4, N5])]
-            return x, auxiliary if self.use_category_supervision else sh
+            if self.use_category_supervision or self.vegetation_aux_head is not None:
+                return x, auxiliary
+            return x, sh
         else:
             x = self.decoder([N2, N3, N4, N5])
             return x
